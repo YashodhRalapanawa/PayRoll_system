@@ -1,0 +1,25 @@
+#!/bin/sh
+# Runs the same checks as CI before pushing. Any failure aborts the push.
+# Enable once per clone:  git config core.hooksPath .githooks
+
+if [ ! -f package.json ]; then
+  echo "pre-push: no package.json yet, skipping checks."
+  exit 0
+fi
+
+run() {
+  echo "pre-push: $*"
+  if ! "$@"; then
+    echo ""
+    echo "❌ pre-push check failed: $*"
+    echo "   Fix the errors above, then push again."
+    exit 1
+  fi
+}
+
+run npm run lint --if-present
+[ -f tsconfig.json ] && run npx tsc --noEmit
+run npm test --if-present
+run npm run build --if-present
+
+echo "✅ pre-push: all checks passed."
