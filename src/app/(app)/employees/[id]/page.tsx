@@ -2,10 +2,14 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { use, useEffect, useRef, useState } from "react";
-import { ArrowLeft, FileText, MoreVertical, Pencil, Plus, Trash2, UserCheck, UserX } from "lucide-react";
+import { ArrowLeft, Download, FileText, MoreVertical, Paperclip, Pencil, Plus, Trash2, UserCheck, UserX } from "lucide-react";
 import { Avatar, Button, Card, DataTable, EmptyState, Field, IconBtn, Input, Modal, StatusBadge, Tabs } from "@/components/ui";
-import { empName, useStore } from "@/lib/store";
-import { fmtDate, fmtHours, fmtPeriod, fmtTime, hoursBetween, money, today, uid } from "@/lib/format";
+import { useToast } from "@/components/ui/useToast";
+import { empName, useCan, useStore } from "@/lib/store";
+import { addDocument, deleteDocument, deleteEmployee, documentUrl, listDocuments, setEmployeeStatus } from "@/lib/api/hr";
+import { errorMessage } from "@/lib/api/client";
+import { fmtDate, fmtHours, fmtPeriod, fmtTime, hoursBetween, money } from "@/lib/format";
+import type { DocumentRef } from "@/lib/types";
 import { calcLine } from "@/lib/payroll";
 import { leaveBalances } from "@/lib/leave";
 
@@ -18,8 +22,16 @@ export default function EmployeeProfilePage({ params }: { params: Promise<{ id: 
   const e = s.employees.find((x) => x.id === id);
   const [tab, setTab] = useState<Tab>("personal");
   const [menu, setMenu] = useState(false);
-  const [doc, setDoc] = useState<{ name: string; reference: string } | null>(null);
+  const [doc, setDoc] = useState<{ name: string; reference: string; file: File | null } | null>(null);
+  const [docs, setDocs] = useState<DocumentRef[] | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [toast, show] = useToast();
+  const can = useCan();
   const menuRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (tab !== "documents" || docs) return;
+    listDocuments(id).then(setDocs).catch((x) => { setDocs([]); show(errorMessage(x)); });
+  }, [tab, docs, id, show]);
   useEffect(() => {
     const h = (ev: MouseEvent) => menuRef.current && !menuRef.current.contains(ev.target as Node) && setMenu(false);
     document.addEventListener("mousedown", h);
@@ -61,25 +73,30 @@ export default function EmployeeProfilePage({ params }: { params: Promise<{ id: 
             <p className="text-sm text-slate-500">{e.empNo} • {des}</p>
             <div className="mt-2"><StatusBadge status={e.status} /></div>
           </div>
-          <div className="flex items-center gap-2">
+          {can.manageHR && <div className="flex items-center gap-2">
             <Button icon={Pencil} onClick={() => router.push(`/employees/${e.id}/edit`)}>Edit</Button>
             <div className="relative" ref={menuRef}>
               <Button variant="secondary" onClick={() => setMenu(!menu)} aria-label="More"><MoreVertical className="h-4 w-4" /></Button>
               {menu && (
                 <div className="absolute right-0 top-12 z-10 w-52 rounded-xl border border-slate-100 bg-white p-2 shadow-xl">
-                  <button onClick={() => { s.upsert("employees", { ...e, status: e.status === "Active" ? "Inactive" : "Active" }); setMenu(false); }} className="flex w-full cursor-pointer items-center gap-2 rounded-lg px-3 py-2 text-sm text-slate-700 hover:bg-slate-50">
+                  <button onClick={async () => {
+                    setMenu(false);
+                    try { await setEmployeeStatus(e, e.status === "Active" ? "Inactive" : "Active"); show("Status updated"); } catch (x) { show(errorMessage(x)); }
+                  }} className="flex w-full cursor-pointer items-center gap-2 rounded-lg px-3 py-2 text-sm text-slate-700 hover:bg-slate-50">
                     {e.status === "Active" ? <UserX className="h-4 w-4" /> : <UserCheck className="h-4 w-4" />} Mark {e.status === "Active" ? "Inactive" : "Active"}
                   </button>
-                  <button onClick={() => {
-                    if (s.payrollRuns.some((r) => r.lines.some((l) => l.employeeId === e.id))) return alert("This employee has payroll history. Mark them inactive instead.");
-                    if (confirm(`Delete ${empName(e)}? This cannot be undone.`)) { s.remove("employees", e.id); router.replace("/employees"); }
+                  <button onClick={async () => {
+                    setMenu(false);
+                    if (s.payrollRuns.some((r) => r.lines.some((l) => l.employeeId === e.id))) return show("This employee has payroll history. Mark them inactive instead.");
+                    if (!confirm(`Delete ${empName(e)} and their attendance and documents? This cannot be undone.`)) return;
+                    try { await deleteEmployee(e.id); router.replace("/employees"); } catch (x) { show(errorMessage(x)); }
                   }} className="flex w-full cursor-pointer items-center gap-2 rounded-lg px-3 py-2 text-sm text-rose-600 hover:bg-rose-50">
                     <Trash2 className="h-4 w-4" /> Delete employee
                   </button>
                 </div>
               )}
             </div>
-          </div>
+          </div>}
         </div>
       </Card>
 
@@ -105,7 +122,7 @@ export default function EmployeeProfilePage({ params }: { params: Promise<{ id: 
         {tab === "salary" && (
           <div className="p-6">
             {!structure && !e.basicSalary ? (
-              <EmptyState icon={FileText} title="No salary assigned" text="Assign a salary structure to include this employee in payroll." action={<Button onClick={() => router.push(`/employees/${e.id}/edit`)}>Assign salary</Button>} />
+              <EmptyState icon={FileText} title="No salary assigned" text="Assign a salary structure to include this employee in payroll." action={can.manageHR ? <Button onClick={() => router.push(`/employees/${e.id}/edit`)}>Assign salary</Button> : undefined} />
             ) : (
               <>
                 <Info items={[["Salary Structure", structure?.name ?? "Custom"], ["Basic Salary", money(line.basic, code)], ["EPF Number", e.epfNo], ["Bank", e.bankName], ["Account No.", e.bankAccount]]} />
@@ -159,14 +176,24 @@ export default function EmployeeProfilePage({ params }: { params: Promise<{ id: 
         {tab === "documents" && (
           <div>
             <div className="flex items-center justify-between px-5 pt-5">
-              <p className="text-sm text-slate-500">Document references (file storage will be connected with the backend).</p>
-              <Button size="sm" icon={Plus} onClick={() => setDoc({ name: "", reference: "" })}>Add Document</Button>
+              <p className="text-sm text-slate-500">Files are stored privately. Downloads use short-lived links.</p>
+              {can.manageHR && <Button size="sm" icon={Plus} onClick={() => setDoc({ name: "", reference: "", file: null })}>Add Document</Button>}
             </div>
-            <DataTable rows={e.documents} empty={<EmptyState icon={FileText} title="No documents" />} columns={[
-              { key: "n", header: "Document", render: (d) => <span className="flex items-center gap-2 font-medium"><FileText className="h-4 w-4 text-brand-500" />{d.name}</span> },
-              { key: "r", header: "Reference", render: (d) => d.reference },
+            <DataTable rows={docs ?? []} empty={<EmptyState icon={FileText} title={docs ? "No documents" : "Loading…"} />} columns={[
+              { key: "n", header: "Document", render: (d) => <span className="flex items-center gap-2 font-medium"><FileText className="h-4 w-4 text-brand-500" />{d.name}{d.hasFile && <Paperclip className="h-3.5 w-3.5 text-slate-400" />}</span> },
+              { key: "r", header: "Reference", render: (d) => d.reference || "—" },
               { key: "a", header: "Added", render: (d) => fmtDate(d.addedOn) },
-              { key: "x", header: "", className: "text-right", render: (d) => <IconBtn icon={Trash2} tone="danger" label="Remove" onClick={() => s.upsert("employees", { ...e, documents: e.documents.filter((x) => x.id !== d.id) })} /> },
+              { key: "x", header: "", className: "text-right", render: (d) => (
+                <>
+                  {d.hasFile && <IconBtn icon={Download} label="Download" onClick={async () => {
+                    try { window.location.assign(await documentUrl(e.id, d.id)); } catch (x) { show(errorMessage(x)); }
+                  }} />}
+                  {can.manageHR && <IconBtn icon={Trash2} tone="danger" label="Remove" onClick={async () => {
+                    if (!confirm(`Remove ${d.name}?`)) return;
+                    try { await deleteDocument(e.id, d.id); setDocs((list) => (list ?? []).filter((x) => x.id !== d.id)); } catch (x) { show(errorMessage(x)); }
+                  }} />}
+                </>
+              ) },
             ]} />
           </div>
         )}
@@ -174,15 +201,28 @@ export default function EmployeeProfilePage({ params }: { params: Promise<{ id: 
 
       <Modal open={!!doc} onClose={() => setDoc(null)} title="Add Document Reference" footer={
         <><Button variant="secondary" onClick={() => setDoc(null)}>Cancel</Button>
-          <Button disabled={!doc?.name.trim()} onClick={() => { s.upsert("employees", { ...e, documents: [...e.documents, { id: uid(), name: doc!.name, reference: doc!.reference, addedOn: today() }] }); setDoc(null); }}>Add</Button></>
+          <Button disabled={!doc?.name.trim() || busy} onClick={async () => {
+            setBusy(true);
+            try {
+              const added = await addDocument(e.id, doc!);
+              setDocs((list) => [added, ...(list ?? [])]);
+              setDoc(null);
+              show("Document added");
+            } catch (x) { show(errorMessage(x)); } finally { setBusy(false); }
+          }}>{busy ? "Uploading…" : "Add"}</Button></>
       }>
         {doc && (
           <div className="space-y-4">
-            <Field label="Document Name" required><Input placeholder="e.g. NIC copy, Appointment letter" value={doc.name} onChange={(x) => setDoc({ ...doc, name: x.target.value })} /></Field>
-            <Field label="Reference / Location"><Input placeholder="e.g. HR file #12, drive link" value={doc.reference} onChange={(x) => setDoc({ ...doc, reference: x.target.value })} /></Field>
+            <Field label="Document Name" required><Input placeholder="e.g. NIC copy, Appointment letter" maxLength={120} value={doc.name} onChange={(x) => setDoc({ ...doc, name: x.target.value })} /></Field>
+            <Field label="Reference / Location"><Input placeholder="e.g. HR file #12" maxLength={300} value={doc.reference} onChange={(x) => setDoc({ ...doc, reference: x.target.value })} /></Field>
+            <Field label="File (optional)" hint="PDF, PNG, JPG or WEBP, up to 10MB.">
+              <input type="file" accept="application/pdf,image/png,image/jpeg,image/webp" className="block w-full text-sm text-slate-600 file:mr-3 file:rounded-lg file:border-0 file:bg-brand-50 file:px-3 file:py-2 file:text-sm file:font-medium file:text-brand-700"
+                onChange={(x) => setDoc({ ...doc, file: x.target.files?.[0] ?? null })} />
+            </Field>
           </div>
         )}
       </Modal>
+      {toast}
     </div>
   );
 }

@@ -5,10 +5,13 @@ import { useRef, useState } from "react";
 import { Building2, CalendarDays, Check, CircleDollarSign, Download, Pencil, Plus, Save, Server, ShieldCheck, Trash2, Umbrella, X, type LucideIcon } from "lucide-react";
 import { Avatar, Button, Card, DataTable, EmptyState, Field, IconBtn, Input, Modal, Select, Textarea } from "@/components/ui";
 import { useToast } from "@/components/ui/useToast";
-import { useCurrentUser, useStore } from "@/lib/store";
+import { useCan, useStore } from "@/lib/store";
+import { RolesSettings } from "@/components/settings/RolesSettings";
+import { removeLogo, saveCompany, uploadLogo } from "@/lib/api/hr";
+import { errorMessage } from "@/lib/api/client";
 import { COUNTRIES, findCountry } from "@/lib/countries";
 import { fmtDate, uid } from "@/lib/format";
-import type { Holiday, LeaveType, PayrollSettings, User } from "@/lib/types";
+import type { Holiday, LeaveType, PayrollSettings } from "@/lib/types";
 
 type Sec = "company" | "payroll" | "leave" | "holidays" | "roles" | "system";
 const SECTIONS: { key: Sec; label: string; icon: LucideIcon }[] = [
@@ -42,7 +45,7 @@ export default function SettingsPage() {
           {sec === "payroll" && <PayrollConfig show={show} />}
           {sec === "leave" && <LeaveTypes show={show} />}
           {sec === "holidays" && <Holidays show={show} />}
-          {sec === "roles" && <Roles show={show} />}
+          {sec === "roles" && <RolesSettings show={show} />}
           {sec === "system" && <SystemSettings show={show} />}
         </div>
       </div>
@@ -55,47 +58,73 @@ type P = { show: (m: string) => void };
 
 function CompanySettings({ show }: P) {
   const s = useStore();
+  const can = useCan();
   const [c, setC] = useState(s.company!);
   const [err, setErr] = useState("");
+  const [busy, setBusy] = useState(false);
   const ref = useRef<HTMLInputElement>(null);
-  function onLogo(f?: File) {
+  async function onLogo(f?: File) {
     if (!f) return;
     if (!["image/png", "image/jpeg"].includes(f.type) || f.size > 2 * 1024 * 1024) return setErr("Logo must be PNG/JPG, max 2MB.");
-    const r = new FileReader();
-    r.onload = () => { setC({ ...c, logo: r.result as string }); setErr(""); };
-    r.readAsDataURL(f);
+    setErr("");
+    try {
+      const logo = await uploadLogo(f);
+      setC((x) => ({ ...x, logo }));
+      show("Logo updated");
+    } catch (e) {
+      setErr(errorMessage(e));
+    }
+  }
+  async function dropLogo() {
+    try {
+      await removeLogo();
+      setC((x) => ({ ...x, logo: undefined }));
+    } catch (e) {
+      setErr(errorMessage(e));
+    }
+  }
+  async function save() {
+    if (!c.name.trim()) return setErr("Company name is required.");
+    setBusy(true);
+    try {
+      const saved = await saveCompany(c);
+      setC(saved);
+      setErr("");
+      show("Changes saved");
+    } catch (e) {
+      setErr(errorMessage(e));
+    } finally {
+      setBusy(false);
+    }
   }
   return (
     <Card title="Company Settings">
       <div className="grid gap-8 p-5 md:grid-cols-[160px_1fr]">
         <div className="flex flex-col items-center gap-3">
           {c.logo ? <img src={c.logo} alt="" className="h-28 w-28 rounded-full border border-slate-100 object-contain" /> : <Avatar name={c.name} size={112} />}
-          <Button size="sm" variant="secondary" onClick={() => ref.current?.click()}>Change Logo</Button>
-          {c.logo && <button className="cursor-pointer text-xs text-rose-500" onClick={() => setC({ ...c, logo: undefined })}>Remove</button>}
-          <input ref={ref} type="file" hidden accept="image/png,image/jpeg" onChange={(e) => onLogo(e.target.files?.[0])} />
-          {err && <p className="text-center text-xs text-rose-600">{err}</p>}
+          {can.admin && <Button size="sm" variant="secondary" onClick={() => ref.current?.click()}>Change Logo</Button>}
+          {can.admin && c.logo && <button className="cursor-pointer text-xs text-rose-500" onClick={dropLogo}>Remove</button>}
+          <input ref={ref} type="file" hidden accept="image/png,image/jpeg" onChange={(e) => { onLogo(e.target.files?.[0]); e.target.value = ""; }} />
         </div>
         <div className="grid gap-4 sm:grid-cols-2">
-          <Field label="Company Name" className="sm:col-span-2"><Input value={c.name} onChange={(e) => setC({ ...c, name: e.target.value })} /></Field>
-          <Field label="Business Email"><Input value={c.email} onChange={(e) => setC({ ...c, email: e.target.value })} /></Field>
-          <Field label="Phone Number"><Input value={c.phone} onChange={(e) => setC({ ...c, phone: e.target.value })} /></Field>
-          <Field label="Address" className="sm:col-span-2"><Textarea value={c.address} onChange={(e) => setC({ ...c, address: e.target.value })} /></Field>
+          {err && <p role="alert" className="rounded-lg bg-rose-50 px-3 py-2 text-sm text-rose-700 sm:col-span-2">{err}</p>}
+          <Field label="Company Name" className="sm:col-span-2"><Input maxLength={120} disabled={!can.admin} value={c.name} onChange={(e) => setC({ ...c, name: e.target.value })} /></Field>
+          <Field label="Business Email"><Input maxLength={254} disabled={!can.admin} value={c.email} onChange={(e) => setC({ ...c, email: e.target.value })} /></Field>
+          <Field label="Phone Number"><Input maxLength={20} disabled={!can.admin} value={c.phone} onChange={(e) => setC({ ...c, phone: e.target.value })} /></Field>
+          <Field label="Address" className="sm:col-span-2"><Textarea maxLength={500} disabled={!can.admin} value={c.address} onChange={(e) => setC({ ...c, address: e.target.value })} /></Field>
           <Field label="Country">
-            <Select value={c.country} onChange={(e) => { const k = findCountry(e.target.value); setC({ ...c, country: k.name, currencyCode: k.code, currencySymbol: k.symbol, currencyName: k.currency }); }}>
+            <Select value={c.country} disabled={!can.admin} onChange={(e) => { const k = findCountry(e.target.value); setC({ ...c, country: k.name, currencyCode: k.code, currencySymbol: k.symbol, currencyName: k.currency }); }}>
               {COUNTRIES.map((k) => <option key={k.name} value={k.name}>{k.flag} {k.name}</option>)}
             </Select>
           </Field>
           <Field label="Currency"><Input disabled value={`${c.currencyCode} – ${c.currencyName}`} /></Field>
         </div>
       </div>
-      <div className="flex justify-end border-t border-slate-100 p-5">
-        <Button icon={Save} onClick={() => {
-          if (!c.name.trim()) return setErr("Company name is required.");
-          s.saveCompany(c);
-          s.log("settings", "Company settings updated", `${c.name} profile was updated.`);
-          show("Changes saved");
-        }}>Save Changes</Button>
-      </div>
+      {can.admin && (
+        <div className="flex justify-end border-t border-slate-100 p-5">
+          <Button icon={Save} onClick={save} disabled={busy}>{busy ? "Saving…" : "Save Changes"}</Button>
+        </div>
+      )}
     </Card>
   );
 }
@@ -171,61 +200,18 @@ function Holidays({ show }: P) {
   );
 }
 
-const PERMS: [string, boolean, boolean, boolean][] = [
-  ["View dashboard", true, true, true],
-  ["Manage employees", true, true, false],
-  ["Attendance & shifts", true, true, false],
-  ["Approve leave", true, true, false],
-  ["Salary structures", true, false, false],
-  ["Process & approve payroll", true, false, false],
-  ["View reports", true, true, true],
-  ["Company & system settings", true, false, false],
-];
-
-function Roles({ show }: P) {
-  const s = useStore();
-  const me = useCurrentUser();
-  return (
-    <div className="space-y-6">
-      <Card title="Users">
-        <DataTable rows={s.users} columns={[
-          { key: "n", header: "User", render: (u) => <div className="flex items-center gap-3"><Avatar name={u.name} size={32} /><div><div className="font-medium">{u.name}</div><div className="text-xs text-slate-400">{u.email}</div></div></div> },
-          { key: "r", header: "Role", render: (u) => (
-            <Select className="w-44 py-1.5" value={u.role} disabled={u.id === me?.id} onChange={(e) => { s.upsert("users", { ...u, role: e.target.value as User["role"] }); show("Role updated"); }}>
-              <option>Administrator</option><option>HR Manager</option><option>Viewer</option>
-            </Select>
-          ) },
-        ]} />
-        <p className="px-5 pb-5 text-xs text-slate-500">New users register from the sign-up page. Role enforcement is applied when the backend and row-level security are connected.</p>
-      </Card>
-      <Card title="Permission Matrix">
-        <div className="overflow-x-auto p-5">
-          <table className="w-full min-w-[480px] text-sm">
-            <thead><tr className="text-left text-xs uppercase text-slate-500"><th className="py-2">Permission</th><th>Administrator</th><th>HR Manager</th><th>Viewer</th></tr></thead>
-            <tbody>
-              {PERMS.map(([p, ...r]) => (
-                <tr key={p} className="border-t border-slate-100">
-                  <td className="py-2.5 text-slate-700">{p}</td>
-                  {r.map((v, i) => <td key={i}>{v ? <Check className="h-4 w-4 text-emerald-500" /> : <X className="h-4 w-4 text-slate-300" />}</td>)}
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      </Card>
-    </div>
-  );
-}
-
 function SystemSettings({ show }: P) {
   const s = useStore();
   const router = useRouter();
   const [confirmReset, setConfirmReset] = useState(false);
   const [typed, setTyped] = useState("");
   function exportData() {
-    const raw = localStorage.getItem("hr-payroll-store") ?? "{}";
-    const data = JSON.parse(raw);
-    if (data.state?.users) data.state.users = data.state.users.map((u: User) => ({ ...u, password: undefined }));
+    let data: unknown = {};
+    try {
+      data = JSON.parse(localStorage.getItem("hr-payroll-store") ?? "{}");
+    } catch {
+      // unreadable local data: export an empty object
+    }
     const url = URL.createObjectURL(new Blob([JSON.stringify(data, null, 2)], { type: "application/json" }));
     const a = document.createElement("a");
     a.href = url;
@@ -238,21 +224,21 @@ function SystemSettings({ show }: P) {
     <div className="space-y-6">
       <Card title="Data">
         <div className="space-y-4 p-5 text-sm text-slate-600">
-          <p>This MVP stores data in this browser only. Records: {s.employees.length} employees, {s.attendance.length} attendance entries, {s.leaveRequests.length} leave requests, {s.payrollRuns.length} payroll runs.</p>
-          <Button variant="secondary" icon={Download} onClick={exportData}>Export backup (JSON)</Button>
+          <p>Employees, attendance and organization data are stored securely on the server ({s.employees.length} employees). Leave, salary and payroll data are still kept in this browser ({s.leaveRequests.length} leave requests, {s.payrollRuns.length} payroll runs) and are cleared when you sign out.</p>
+          <Button variant="secondary" icon={Download} onClick={exportData}>Export local data (JSON)</Button>
         </div>
       </Card>
       <Card title="Danger zone">
         <div className="flex flex-wrap items-center justify-between gap-4 p-5">
-          <p className="text-sm text-slate-600">Delete all company data, users and settings from this browser.</p>
-          <Button variant="danger" icon={Trash2} onClick={() => setConfirmReset(true)}>Reset all data</Button>
+          <p className="text-sm text-slate-600">Delete the leave, salary and payroll data stored in this browser. Server data is not affected.</p>
+          <Button variant="danger" icon={Trash2} onClick={() => setConfirmReset(true)}>Reset local data</Button>
         </div>
       </Card>
-      <Modal open={confirmReset} onClose={() => setConfirmReset(false)} title="Reset all data?" footer={
+      <Modal open={confirmReset} onClose={() => setConfirmReset(false)} title="Reset local data?" footer={
         <><Button variant="secondary" onClick={() => setConfirmReset(false)}>Cancel</Button>
-          <Button variant="danger" disabled={typed !== "RESET"} onClick={() => { s.resetAll(); router.replace("/register"); }}>Delete everything</Button></>
+          <Button variant="danger" disabled={typed !== "RESET"} onClick={() => { s.resetAll(); setConfirmReset(false); setTyped(""); show("Local data cleared"); router.replace("/dashboard"); }}>Delete local data</Button></>
       }>
-        <p className="mb-3 text-sm text-slate-600">This permanently deletes every record and cannot be undone. Type <b>RESET</b> to confirm.</p>
+        <p className="mb-3 text-sm text-slate-600">This permanently deletes the leave, salary and payroll data in this browser and cannot be undone. Type <b>RESET</b> to confirm.</p>
         <Input value={typed} onChange={(e) => setTyped(e.target.value)} />
       </Modal>
     </div>

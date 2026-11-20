@@ -1,17 +1,14 @@
-"use client";
-import { useRouter } from "next/navigation";
-import { useEffect } from "react";
-import { useHydrated, useStore } from "@/lib/store";
-import { Spinner } from "@/components/layout/AppShell";
+import { redirect } from "next/navigation";
+import { createClient } from "@/lib/supabase/server";
 
-export default function Home() {
-  const router = useRouter();
-  const hydrated = useHydrated();
-  const session = useStore((s) => s.sessionUserId);
-  const setupComplete = useStore((s) => s.setupComplete);
-  useEffect(() => {
-    if (!hydrated) return;
-    router.replace(!session ? "/login" : setupComplete ? "/dashboard" : "/setup");
-  }, [hydrated, session, setupComplete, router]);
-  return <Spinner />;
+/** Entry point: signed-out → /login, no company yet → /setup, otherwise → /dashboard. */
+export default async function Home() {
+  const supabase = await createClient();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  if (!user) redirect("/login");
+
+  const { data } = await supabase.from("profiles").select("company_id").eq("id", user.id).maybeSingle<{ company_id: string | null }>();
+  redirect(data?.company_id ? "/dashboard" : "/setup");
 }

@@ -1,6 +1,9 @@
 export type Status = "Active" | "Inactive";
 
-export interface User { id: string; name: string; email: string; password: string; role: "Administrator" | "HR Manager" | "Viewer" }
+export type RoleLabel = "Administrator" | "HR Manager" | "Viewer";
+export interface User { id: string; name: string; email: string; role: RoleLabel }
+export interface Me extends User { companyId: string | null }
+export interface Invite { id: string; email: string; role: RoleLabel; createdAt: string }
 export interface Company {
   name: string; email: string; phone: string; address: string; logo?: string;
   country: string; currencyCode: string; currencySymbol: string; currencyName: string;
@@ -8,7 +11,7 @@ export interface Company {
 export interface Branch { id: string; name: string; code: string; address: string; contact: string }
 export interface Department { id: string; name: string }
 export interface Designation { id: string; name: string; departmentId?: string }
-export interface DocumentRef { id: string; name: string; reference: string; addedOn: string }
+export interface DocumentRef { id: string; name: string; reference: string; addedOn: string; hasFile?: boolean; mimeType?: string; size?: number }
 export interface Employee {
   id: string; empNo: string; firstName: string; lastName: string; nic: string; dob: string; gender: string;
   phone: string; email: string; address: string;

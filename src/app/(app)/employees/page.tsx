@@ -4,12 +4,13 @@ import { useRouter } from "next/navigation";
 import { useMemo, useState } from "react";
 import { Download, Eye, Pencil, Plus, Users } from "lucide-react";
 import { Avatar, Button, Card, DataTable, EmptyState, IconBtn, PageHeader, Select, StatusBadge } from "@/components/ui";
-import { empName, useStore } from "@/lib/store";
+import { empName, useCan, useStore } from "@/lib/store";
 import { downloadCSV } from "@/lib/format";
 
 export default function EmployeesPage() {
   const router = useRouter();
   const s = useStore();
+  const can = useCan();
   const [dep, setDep] = useState("");
   const [status, setStatus] = useState("");
   const dName = (id: string) => s.departments.find((d) => d.id === id)?.name ?? "—";
@@ -27,7 +28,7 @@ export default function EmployeesPage() {
             ["Emp ID", "Name", "NIC", "Department", "Designation", "Phone", "Email", "Join Date", "Status"],
             ...rows.map((e) => [e.empNo, empName(e), e.nic, dName(e.departmentId), gName(e.designationId), e.phone, e.email, e.joinDate, e.status]),
           ])}>Export</Button>
-          <Link href="/employees/new"><Button icon={Plus}>Add Employee</Button></Link>
+          {can.manageHR && <Link href="/employees/new"><Button icon={Plus}>Add Employee</Button></Link>}
         </>
       } />
       <Card>
@@ -50,7 +51,7 @@ export default function EmployeesPage() {
           empty={
             <EmptyState icon={Users} title={s.employees.length ? "No matching employees" : "No employees yet"}
               text={s.employees.length ? "Try a different search or filter." : "Add your first employee to get started."}
-              action={!s.employees.length && <Link href="/employees/new"><Button icon={Plus}>Add Employee</Button></Link>} />
+              action={!s.employees.length && can.manageHR && <Link href="/employees/new"><Button icon={Plus}>Add Employee</Button></Link>} />
           }
           columns={[
             { key: "id", header: "Emp ID", render: (e) => <span className="font-medium text-slate-800">{e.empNo}</span> },
@@ -61,7 +62,7 @@ export default function EmployeesPage() {
             { key: "a", header: "Actions", className: "text-right", render: (e) => (
               <>
                 <IconBtn icon={Eye} label="View" onClick={() => router.push(`/employees/${e.id}`)} />
-                <IconBtn icon={Pencil} label="Edit" onClick={() => router.push(`/employees/${e.id}/edit`)} />
+                {can.manageHR && <IconBtn icon={Pencil} label="Edit" onClick={() => router.push(`/employees/${e.id}/edit`)} />}
               </>
             ) },
           ]}

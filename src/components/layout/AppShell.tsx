@@ -1,6 +1,8 @@
 "use client";
 import { useRouter } from "next/navigation";
 import { useEffect, useState, type ReactNode } from "react";
+import { loadBootstrap } from "@/lib/api/hr";
+import { errorMessage } from "@/lib/api/client";
 import { useHydrated, useStore } from "@/lib/store";
 import { Sidebar } from "./Sidebar";
 import { Topbar } from "./Topbar";
@@ -13,21 +15,45 @@ export function Spinner() {
   );
 }
 
-/** Guards app pages: needs a session and a completed company setup. */
+/**
+ * Loads the signed-in user's data from the server, then renders the app.
+ * The middleware already keeps signed-out users out; this sends users without
+ * a company to /setup.
+ */
 export function AppShell({ children }: { children: ReactNode }) {
   const hydrated = useHydrated();
   const router = useRouter();
-  const session = useStore((s) => s.sessionUserId);
-  const setupComplete = useStore((s) => s.setupComplete);
+  const ready = useStore((s) => s.serverReady);
   const [open, setOpen] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [attempt, setAttempt] = useState(0);
 
   useEffect(() => {
-    if (!hydrated) return;
-    if (!session) router.replace("/login");
-    else if (!setupComplete) router.replace("/setup");
-  }, [hydrated, session, setupComplete, router]);
+    if (!hydrated || ready) return;
+    let alive = true;
+    setError(null);
+    loadBootstrap()
+      .then((r) => {
+        if (!alive) return;
+        if (r === "unauthenticated") router.replace("/login");
+        else if (r === "needs-setup") router.replace("/setup");
+      })
+      .catch((e) => alive && setError(errorMessage(e)));
+    return () => {
+      alive = false;
+    };
+  }, [hydrated, ready, router, attempt]);
 
-  if (!hydrated || !session || !setupComplete) return <Spinner />;
+  if (error)
+    return (
+      <div className="flex min-h-screen flex-col items-center justify-center gap-3 p-6 text-center">
+        <p className="text-sm text-slate-600">Could not load your data: {error}</p>
+        <button onClick={() => setAttempt((n) => n + 1)} className="cursor-pointer rounded-xl bg-brand-600 px-4 py-2 text-sm font-semibold text-white hover:bg-brand-700">
+          Try again
+        </button>
+      </div>
+    );
+  if (!hydrated || !ready) return <Spinner />;
   return (
     <div className="min-h-screen">
       <Sidebar open={open} onClose={() => setOpen(false)} />
