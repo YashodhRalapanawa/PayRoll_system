@@ -98,6 +98,7 @@ const employeeFields = {
   joinDate: isoDate,
   employmentType: z.enum(["Permanent", "Contract", "Probation", "Intern"]),
   status: statusLabel,
+  salaryStructureId: uuid.nullable().optional(),
   basicSalary: z.number().finite().nonnegative("Must be zero or more").max(1_000_000_000).nullable().optional(),
   bankName: optionalText(100),
   bankAccount: text(34).regex(/^[0-9A-Za-z -]*$/, "Use letters, numbers, spaces and - only").optional().transform((v) => v || null),
@@ -109,7 +110,7 @@ const employeeColumns: Record<EmployeeKey, string> = {
   empNo: "emp_no", firstName: "first_name", lastName: "last_name", nic: "nic", dob: "dob", gender: "gender",
   phone: "phone", email: "email", address: "address", departmentId: "department_id", designationId: "designation_id",
   branchId: "branch_id", shiftId: "shift_id", joinDate: "join_date", employmentType: "employment_type", status: "status",
-  basicSalary: "basic_override", bankName: "bank_name", bankAccount: "bank_account", epfNo: "epf_no",
+  salaryStructureId: "salary_structure_id", basicSalary: "basic_override", bankName: "bank_name", bankAccount: "bank_account", epfNo: "epf_no",
 };
 
 function employeeToRow(input: Partial<Record<EmployeeKey, unknown>>) {
@@ -127,6 +128,7 @@ function employeeToRow(input: Partial<Record<EmployeeKey, unknown>>) {
 export const employeeCreateSchema = z.object(employeeFields).transform((e) => ({
   ...employeeToRow(e),
   shift_id: e.shiftId ?? null,
+  salary_structure_id: e.salaryStructureId ?? null,
   basic_override: e.basicSalary ?? null,
 }));
 
@@ -192,6 +194,68 @@ export const attendanceQuerySchema = z.union([
 ]);
 
 export const periodSchema = z.string().regex(/^\d{4}-(0[1-9]|1[0-2])$/, "Use the format YYYY-MM");
+
+// ---------- leave (B3) ----------
+export const leaveRequestSchema = z
+  .object({
+    employeeId: uuid,
+    leaveTypeId: uuid,
+    from: isoDate,
+    to: isoDate,
+    reason: text(500).default(""),
+  })
+  .refine((l) => l.to >= l.from, { message: "End date must be on or after the start date.", path: ["to"] })
+  .refine((l) => Date.parse(l.to) - Date.parse(l.from) <= 366 * 86_400_000, { message: "A single request cannot exceed one year.", path: ["to"] });
+
+export const leaveTypeSchema = z
+  .object({
+    name: required("Leave type name", 60),
+    daysPerYear: z.number().finite().min(0).max(366).multipleOf(0.5, "Use whole or half days"),
+    paid: z.boolean(),
+  })
+  .transform((t) => ({ name: t.name, days_per_year: t.paid ? t.daysPerYear : 0, paid: t.paid }));
+
+export const holidaySchema = z.object({ name: required("Holiday name", 80), date: isoDate });
+
+// ---------- salary (B4) ----------
+const money = (label: string) => z.number({ invalid_type_error: `${label} must be a number` }).finite().min(0).max(1_000_000_000);
+
+const salaryItemSchema = z
+  .object({
+    name: required("Item name", 60),
+    type: z.enum(["fixed", "percent"]),
+    amount: money("Amount"),
+  })
+  .refine((i) => i.type !== "percent" || i.amount <= 100, { message: "A percentage cannot exceed 100.", path: ["amount"] });
+
+export const salaryStructureSchema = z.object({
+  name: required("Structure name", 80),
+  basic: money("Basic salary").refine((v) => v > 0, "Basic salary must be greater than zero."),
+  allowances: z.array(salaryItemSchema).max(30, "At most 30 allowances"),
+  deductions: z.array(salaryItemSchema).max(30, "At most 30 deductions"),
+});
+
+export const employeeIdsSchema = z.object({ employeeIds: z.array(uuid).max(5000) });
+
+// ---------- payroll (B5/B8) ----------
+const pct = (label: string) => z.number().finite().min(0, `${label} cannot be negative`).max(100, `${label} cannot exceed 100%`);
+
+export const payrollSettingsSchema = z
+  .object({
+    epfEmployee: pct("EPF employee"),
+    epfEmployer: pct("EPF employer"),
+    etf: pct("ETF"),
+    payDay: z.number().int("Whole day only").min(1).max(31),
+    otRate: z.number().finite().min(0).max(10),
+    otHoursDivisor: z.number().finite().min(1).max(744),
+    nopayDaysDivisor: z.number().finite().min(1).max(31),
+  })
+  .transform((p) => ({
+    epf_employee: p.epfEmployee, epf_employer: p.epfEmployer, etf: p.etf, pay_day: p.payDay,
+    ot_rate: p.otRate, ot_hours_divisor: p.otHoursDivisor, nopay_days_divisor: p.nopayDaysDivisor,
+  }));
+
+export const payrollCalculateSchema = z.object({ period: periodSchema });
 
 // ---------- roles & activity ----------
 export const roleUpdateSchema = z.object({ role: roleLabel }).transform((r) => ({ role: ROLE_VALUE[r.role] }));

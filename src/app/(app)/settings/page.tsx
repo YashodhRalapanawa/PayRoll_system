@@ -1,13 +1,13 @@
 "use client";
 import clsx from "clsx";
-import { useRouter } from "next/navigation";
 import { useRef, useState } from "react";
-import { Building2, CalendarDays, Check, CircleDollarSign, Download, Pencil, Plus, Save, Server, ShieldCheck, Trash2, Umbrella, X, type LucideIcon } from "lucide-react";
+import { Building2, CalendarDays, Check, CircleDollarSign, Pencil, Plus, Save, Server, ShieldCheck, Trash2, Umbrella, X, type LucideIcon } from "lucide-react";
 import { Avatar, Button, Card, DataTable, EmptyState, Field, IconBtn, Input, Modal, Select, Textarea } from "@/components/ui";
 import { useToast } from "@/components/ui/useToast";
 import { useCan, useStore } from "@/lib/store";
 import { RolesSettings } from "@/components/settings/RolesSettings";
 import { removeLogo, saveCompany, uploadLogo } from "@/lib/api/hr";
+import { deleteHoliday, deleteLeaveType, saveHoliday, saveLeaveType, savePayrollSettings } from "@/lib/api/payroll";
 import { errorMessage } from "@/lib/api/client";
 import { COUNTRIES, findCountry } from "@/lib/countries";
 import { fmtDate, uid } from "@/lib/format";
@@ -20,7 +20,7 @@ const SECTIONS: { key: Sec; label: string; icon: LucideIcon }[] = [
   { key: "leave", label: "Leave Types", icon: Umbrella },
   { key: "holidays", label: "Holidays", icon: CalendarDays },
   { key: "roles", label: "Roles & Permissions", icon: ShieldCheck },
-  { key: "system", label: "System Settings", icon: Server },
+  { key: "system", label: "Data & Security", icon: Server },
 ];
 
 export default function SettingsPage() {
@@ -46,7 +46,7 @@ export default function SettingsPage() {
           {sec === "leave" && <LeaveTypes show={show} />}
           {sec === "holidays" && <Holidays show={show} />}
           {sec === "roles" && <RolesSettings show={show} />}
-          {sec === "system" && <SystemSettings show={show} />}
+          {sec === "system" && <SystemSettings />}
         </div>
       </div>
       {toast}
@@ -131,44 +131,91 @@ function CompanySettings({ show }: P) {
 
 function PayrollConfig({ show }: P) {
   const s = useStore();
+  const can = useCan();
   const [p, setP] = useState<PayrollSettings>(s.settings);
-  const num = (k: keyof PayrollSettings) => ({ value: p[k], onChange: (e: React.ChangeEvent<HTMLInputElement>) => setP({ ...p, [k]: +e.target.value }) });
+  const [err, setErr] = useState("");
+  const [busy, setBusy] = useState(false);
+  const num = (k: keyof PayrollSettings) => ({
+    value: Number.isFinite(p[k]) ? p[k] : "",
+    disabled: !can.admin,
+    onChange: (e: React.ChangeEvent<HTMLInputElement>) => setP({ ...p, [k]: e.target.value === "" ? NaN : +e.target.value }),
+  });
+  async function save() {
+    setBusy(true);
+    try {
+      setP(await savePayrollSettings(p));
+      setErr("");
+      show("Payroll configuration saved");
+    } catch (e) {
+      setErr(errorMessage(e));
+    } finally {
+      setBusy(false);
+    }
+  }
   return (
     <Card title="Payroll Configuration">
       <div className="grid gap-4 p-5 sm:grid-cols-2">
-        <Field label="EPF – Employee contribution (%)"><Input type="number" step={0.5} min={0} {...num("epfEmployee")} /></Field>
-        <Field label="EPF – Employer contribution (%)"><Input type="number" step={0.5} min={0} {...num("epfEmployer")} /></Field>
-        <Field label="ETF – Employer contribution (%)"><Input type="number" step={0.5} min={0} {...num("etf")} /></Field>
-        <Field label="Overtime rate (× hourly)" hint="Hourly rate = basic ÷ 240"><Input type="number" step={0.25} min={0} {...num("otRate")} /></Field>
-        <Field label="Pay day (day of month)"><Input type="number" min={1} max={31} {...num("payDay")} /></Field>
-        <p className="self-end rounded-lg bg-amber-50 px-4 py-3 text-xs text-amber-800 sm:col-span-2">Statutory calculations must be checked against current official rules before real payroll is processed. APIT/PAYE tax is not calculated in this MVP.</p>
+        {err && <p role="alert" className="rounded-lg bg-rose-50 px-3 py-2 text-sm text-rose-700 sm:col-span-2">{err}</p>}
+        <Field label="EPF – Employee contribution (%)"><Input type="number" step={0.5} min={0} max={100} {...num("epfEmployee")} /></Field>
+        <Field label="EPF – Employer contribution (%)"><Input type="number" step={0.5} min={0} max={100} {...num("epfEmployer")} /></Field>
+        <Field label="ETF – Employer contribution (%)"><Input type="number" step={0.5} min={0} max={100} {...num("etf")} /></Field>
+        <Field label="Pay day (day of month)" hint="Months with fewer days pay on their last day."><Input type="number" min={1} max={31} {...num("payDay")} /></Field>
+        <Field label="Overtime rate (× hourly)"><Input type="number" step={0.25} min={0} max={10} {...num("otRate")} /></Field>
+        <Field label="Overtime hours divisor" hint={`Hourly rate = basic ÷ ${p.otHoursDivisor || "?"}`}><Input type="number" min={1} max={744} {...num("otHoursDivisor")} /></Field>
+        <Field label="No-pay days divisor" hint={`Daily rate = basic ÷ ${p.nopayDaysDivisor || "?"}`}><Input type="number" min={1} max={31} {...num("nopayDaysDivisor")} /></Field>
+        <p className="self-end rounded-lg bg-amber-50 px-4 py-3 text-xs text-amber-800 sm:col-span-2">Statutory calculations must be checked against current official rules before real payroll is processed. APIT/PAYE tax is not calculated. Approved payroll runs keep the rates they were calculated with.</p>
       </div>
-      <div className="flex justify-end border-t border-slate-100 p-5">
-        <Button icon={Save} onClick={() => { s.saveSettings(p); s.log("settings", "Payroll configuration updated", `EPF ${p.epfEmployee}%/${p.epfEmployer}%, ETF ${p.etf}%.`); show("Payroll configuration saved"); }}>Save Changes</Button>
-      </div>
+      {can.admin && (
+        <div className="flex justify-end border-t border-slate-100 p-5">
+          <Button icon={Save} onClick={save} disabled={busy}>{busy ? "Saving…" : "Save Changes"}</Button>
+        </div>
+      )}
     </Card>
   );
 }
 
 function LeaveTypes({ show }: P) {
   const s = useStore();
+  const can = useCan();
   const [edit, setEdit] = useState<LeaveType | null>(null);
+  const [busy, setBusy] = useState(false);
+  async function save() {
+    setBusy(true);
+    try {
+      await saveLeaveType(edit!);
+      setEdit(null);
+      show("Leave type saved");
+    } catch (e) {
+      show(errorMessage(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function remove(t: LeaveType) {
+    if (s.leaveRequests.some((l) => l.leaveTypeId === t.id)) return show("In use by leave requests");
+    if (!confirm("Delete leave type?")) return;
+    try {
+      await deleteLeaveType(t.id);
+    } catch (e) {
+      show(errorMessage(e));
+    }
+  }
   return (
-    <Card title="Leave Types" action={<Button size="sm" icon={Plus} onClick={() => setEdit({ id: uid(), name: "", daysPerYear: 0, paid: true })}>Add</Button>}>
+    <Card title="Leave Types" action={can.manageHR ? <Button size="sm" icon={Plus} onClick={() => setEdit({ id: uid(), name: "", daysPerYear: 0, paid: true })}>Add</Button> : undefined}>
       <DataTable rows={s.leaveTypes} columns={[
         { key: "n", header: "Leave Type", render: (t) => <span className="font-medium">{t.name}</span> },
         { key: "d", header: "Days / Year", render: (t) => (t.paid ? t.daysPerYear : "Unlimited") },
         { key: "p", header: "Paid", render: (t) => (t.paid ? <Check className="h-4 w-4 text-emerald-500" /> : <X className="h-4 w-4 text-slate-400" />) },
-        { key: "a", header: "", className: "text-right", render: (t) => (<>
+        { key: "a", header: "", className: "text-right", render: (t) => can.manageHR && (<>
           <IconBtn icon={Pencil} label="Edit" onClick={() => setEdit(t)} />
-          <IconBtn icon={Trash2} tone="danger" label="Delete" onClick={() => s.leaveRequests.some((l) => l.leaveTypeId === t.id) ? show("In use by leave requests") : confirm("Delete leave type?") && s.remove("leaveTypes", t.id)} />
+          <IconBtn icon={Trash2} tone="danger" label="Delete" onClick={() => remove(t)} />
         </>) },
       ]} />
-      <Modal open={!!edit} onClose={() => setEdit(null)} title="Leave Type" footer={<><Button variant="secondary" onClick={() => setEdit(null)}>Cancel</Button><Button disabled={!edit?.name.trim()} onClick={() => { s.upsert("leaveTypes", edit!); setEdit(null); show("Leave type saved"); }}>Save</Button></>}>
+      <Modal open={!!edit} onClose={() => setEdit(null)} title="Leave Type" footer={<><Button variant="secondary" onClick={() => setEdit(null)}>Cancel</Button><Button disabled={!edit?.name.trim() || busy} onClick={save}>{busy ? "Saving…" : "Save"}</Button></>}>
         {edit && (
           <div className="grid gap-4 sm:grid-cols-2">
-            <Field label="Name" required className="sm:col-span-2"><Input autoFocus value={edit.name} onChange={(e) => setEdit({ ...edit, name: e.target.value })} /></Field>
-            <Field label="Days per year"><Input type="number" min={0} value={edit.daysPerYear} disabled={!edit.paid} onChange={(e) => setEdit({ ...edit, daysPerYear: +e.target.value })} /></Field>
+            <Field label="Name" required className="sm:col-span-2"><Input autoFocus maxLength={60} value={edit.name} onChange={(e) => setEdit({ ...edit, name: e.target.value })} /></Field>
+            <Field label="Days per year" hint="Whole or half days."><Input type="number" min={0} max={366} step={0.5} value={edit.daysPerYear} disabled={!edit.paid} onChange={(e) => setEdit({ ...edit, daysPerYear: +e.target.value })} /></Field>
             <Field label="Type"><Select value={edit.paid ? "paid" : "unpaid"} onChange={(e) => setEdit({ ...edit, paid: e.target.value === "paid" })}><option value="paid">Paid</option><option value="unpaid">Unpaid (no-pay deduction)</option></Select></Field>
           </div>
         )}
@@ -179,19 +226,41 @@ function LeaveTypes({ show }: P) {
 
 function Holidays({ show }: P) {
   const s = useStore();
+  const can = useCan();
   const [edit, setEdit] = useState<Holiday | null>(null);
+  const [busy, setBusy] = useState(false);
   const rows = [...s.holidays].sort((a, b) => a.date.localeCompare(b.date));
+  async function save() {
+    setBusy(true);
+    try {
+      await saveHoliday(edit!);
+      setEdit(null);
+      show("Holiday saved");
+    } catch (e) {
+      show(errorMessage(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function remove(h: Holiday) {
+    if (!confirm(`Delete ${h.name}?`)) return;
+    try {
+      await deleteHoliday(h.id);
+    } catch (e) {
+      show(errorMessage(e));
+    }
+  }
   return (
-    <Card title="Holiday Calendar" action={<Button size="sm" icon={Plus} onClick={() => setEdit({ id: uid(), name: "", date: "" })}>Add Holiday</Button>}>
-      <DataTable rows={rows} empty={<EmptyState icon={CalendarDays} title="No holidays" text="Add public and mercantile holidays. They are excluded from leave days." />} columns={[
+    <Card title="Holiday Calendar" action={can.manageHR ? <Button size="sm" icon={Plus} onClick={() => setEdit({ id: uid(), name: "", date: "" })}>Add Holiday</Button> : undefined}>
+      <DataTable rows={rows} empty={<EmptyState icon={CalendarDays} title="No holidays" text="Add public and mercantile holidays. They are excluded from leave and no-pay days." />} columns={[
         { key: "d", header: "Date", render: (h) => fmtDate(h.date, { weekday: "short", month: "short", day: "numeric", year: "numeric" }) },
         { key: "n", header: "Holiday", render: (h) => <span className="font-medium">{h.name}</span> },
-        { key: "a", header: "", className: "text-right", render: (h) => (<><IconBtn icon={Pencil} label="Edit" onClick={() => setEdit(h)} /><IconBtn icon={Trash2} tone="danger" label="Delete" onClick={() => s.remove("holidays", h.id)} /></>) },
+        { key: "a", header: "", className: "text-right", render: (h) => can.manageHR && (<><IconBtn icon={Pencil} label="Edit" onClick={() => setEdit(h)} /><IconBtn icon={Trash2} tone="danger" label="Delete" onClick={() => remove(h)} /></>) },
       ]} />
-      <Modal open={!!edit} onClose={() => setEdit(null)} title="Holiday" footer={<><Button variant="secondary" onClick={() => setEdit(null)}>Cancel</Button><Button disabled={!edit?.name.trim() || !edit?.date} onClick={() => { s.upsert("holidays", edit!); setEdit(null); show("Holiday saved"); }}>Save</Button></>}>
+      <Modal open={!!edit} onClose={() => setEdit(null)} title="Holiday" footer={<><Button variant="secondary" onClick={() => setEdit(null)}>Cancel</Button><Button disabled={!edit?.name.trim() || !edit?.date || busy} onClick={save}>{busy ? "Saving…" : "Save"}</Button></>}>
         {edit && (
           <div className="space-y-4">
-            <Field label="Holiday Name" required><Input autoFocus value={edit.name} onChange={(e) => setEdit({ ...edit, name: e.target.value })} /></Field>
+            <Field label="Holiday Name" required><Input autoFocus maxLength={80} value={edit.name} onChange={(e) => setEdit({ ...edit, name: e.target.value })} /></Field>
             <Field label="Date" required><Input type="date" value={edit.date} onChange={(e) => setEdit({ ...edit, date: e.target.value })} /></Field>
           </div>
         )}
@@ -200,47 +269,15 @@ function Holidays({ show }: P) {
   );
 }
 
-function SystemSettings({ show }: P) {
+function SystemSettings() {
   const s = useStore();
-  const router = useRouter();
-  const [confirmReset, setConfirmReset] = useState(false);
-  const [typed, setTyped] = useState("");
-  function exportData() {
-    let data: unknown = {};
-    try {
-      data = JSON.parse(localStorage.getItem("hr-payroll-store") ?? "{}");
-    } catch {
-      // unreadable local data: export an empty object
-    }
-    const url = URL.createObjectURL(new Blob([JSON.stringify(data, null, 2)], { type: "application/json" }));
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `hr-payroll-backup-${new Date().toISOString().slice(0, 10)}.json`;
-    a.click();
-    URL.revokeObjectURL(url);
-    show("Backup downloaded");
-  }
   return (
-    <div className="space-y-6">
-      <Card title="Data">
-        <div className="space-y-4 p-5 text-sm text-slate-600">
-          <p>Employees, attendance and organization data are stored securely on the server ({s.employees.length} employees). Leave, salary and payroll data are still kept in this browser ({s.leaveRequests.length} leave requests, {s.payrollRuns.length} payroll runs) and are cleared when you sign out.</p>
-          <Button variant="secondary" icon={Download} onClick={exportData}>Export local data (JSON)</Button>
-        </div>
-      </Card>
-      <Card title="Danger zone">
-        <div className="flex flex-wrap items-center justify-between gap-4 p-5">
-          <p className="text-sm text-slate-600">Delete the leave, salary and payroll data stored in this browser. Server data is not affected.</p>
-          <Button variant="danger" icon={Trash2} onClick={() => setConfirmReset(true)}>Reset local data</Button>
-        </div>
-      </Card>
-      <Modal open={confirmReset} onClose={() => setConfirmReset(false)} title="Reset local data?" footer={
-        <><Button variant="secondary" onClick={() => setConfirmReset(false)}>Cancel</Button>
-          <Button variant="danger" disabled={typed !== "RESET"} onClick={() => { s.resetAll(); setConfirmReset(false); setTyped(""); show("Local data cleared"); router.replace("/dashboard"); }}>Delete local data</Button></>
-      }>
-        <p className="mb-3 text-sm text-slate-600">This permanently deletes the leave, salary and payroll data in this browser and cannot be undone. Type <b>RESET</b> to confirm.</p>
-        <Input value={typed} onChange={(e) => setTyped(e.target.value)} />
-      </Modal>
-    </div>
+    <Card title="Data & Security">
+      <div className="space-y-3 p-5 text-sm text-slate-600">
+        <p>All company data is stored in the database ({s.employees.length} employees, {s.leaveRequests.length} leave requests, {s.payrollRuns.length} payroll runs). Nothing is kept in this browser after you sign out.</p>
+        <p>Each company can only see its own records. This is enforced by the database itself (row-level security), not just by the app.</p>
+        <p>Backups and point-in-time recovery are managed in the Supabase dashboard. Use Reports to export data as CSV.</p>
+      </div>
+    </Card>
   );
 }

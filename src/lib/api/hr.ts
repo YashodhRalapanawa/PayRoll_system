@@ -94,15 +94,13 @@ export async function saveEmployee(e: Employee): Promise<Employee> {
   const res = isNew
     ? await api.post<{ employee: Employee }>("/api/employees", e)
     : await api.patch<{ employee: Employee }>(`/api/employees/${e.id}`, e);
-  // Salary structure stays local until B4 (see salaryLinks in the store).
-  const saved = { ...res.employee, salaryStructureId: e.salaryStructureId };
-  st().upsert("employees", saved);
-  return saved;
+  st().upsert("employees", res.employee);
+  return res.employee;
 }
 
 export async function setEmployeeStatus(e: Employee, status: Employee["status"]) {
   const { employee } = await api.patch<{ employee: Employee }>(`/api/employees/${e.id}`, { status });
-  st().upsert("employees", { ...employee, salaryStructureId: e.salaryStructureId });
+  st().upsert("employees", employee);
 }
 
 export async function deleteEmployee(id: string) {
@@ -146,8 +144,7 @@ export async function deleteShift(id: string) {
 
 export async function assignShift(shiftId: string, employeeIds: string[]) {
   const { employees } = await api.post<{ employees: Employee[] }>(`/api/shifts/${shiftId}/assign`, { employeeIds });
-  const links = st().salaryLinks;
-  useStore.setState({ employees: employees.map((e) => ({ ...e, salaryStructureId: links[e.id] ?? e.salaryStructureId })) });
+  useStore.setState({ employees });
 }
 
 // ---------- attendance ----------

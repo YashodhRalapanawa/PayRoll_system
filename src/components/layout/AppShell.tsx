@@ -3,7 +3,7 @@ import { useRouter } from "next/navigation";
 import { useEffect, useState, type ReactNode } from "react";
 import { loadBootstrap } from "@/lib/api/hr";
 import { errorMessage } from "@/lib/api/client";
-import { useHydrated, useStore } from "@/lib/store";
+import { useStore } from "@/lib/store";
 import { Sidebar } from "./Sidebar";
 import { Topbar } from "./Topbar";
 
@@ -21,7 +21,6 @@ export function Spinner() {
  * a company to /setup.
  */
 export function AppShell({ children }: { children: ReactNode }) {
-  const hydrated = useHydrated();
   const router = useRouter();
   const ready = useStore((s) => s.serverReady);
   const [open, setOpen] = useState(false);
@@ -29,7 +28,7 @@ export function AppShell({ children }: { children: ReactNode }) {
   const [attempt, setAttempt] = useState(0);
 
   useEffect(() => {
-    if (!hydrated || ready) return;
+    if (ready) return;
     let alive = true;
     setError(null);
     loadBootstrap()
@@ -42,7 +41,7 @@ export function AppShell({ children }: { children: ReactNode }) {
     return () => {
       alive = false;
     };
-  }, [hydrated, ready, router, attempt]);
+  }, [ready, router, attempt]);
 
   if (error)
     return (
@@ -53,7 +52,7 @@ export function AppShell({ children }: { children: ReactNode }) {
         </button>
       </div>
     );
-  if (!hydrated || !ready) return <Spinner />;
+  if (!ready) return <Spinner />;
   return (
     <div className="min-h-screen">
       <Sidebar open={open} onClose={() => setOpen(false)} />

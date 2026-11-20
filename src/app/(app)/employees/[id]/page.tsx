@@ -10,7 +10,7 @@ import { addDocument, deleteDocument, deleteEmployee, documentUrl, listDocuments
 import { errorMessage } from "@/lib/api/client";
 import { fmtDate, fmtHours, fmtPeriod, fmtTime, hoursBetween, money } from "@/lib/format";
 import type { DocumentRef } from "@/lib/types";
-import { calcLine } from "@/lib/payroll";
+import { calculatePay, resolveBasic } from "@/lib/payroll";
 import { leaveBalances } from "@/lib/leave";
 
 type Tab = "personal" | "employment" | "salary" | "attendance" | "leave" | "documents";
@@ -46,7 +46,8 @@ export default function EmployeeProfilePage({ params }: { params: Promise<{ id: 
   const branch = s.branches.find((b) => b.id === e.branchId)?.name ?? "—";
   const shift = s.shifts.find((x) => x.id === e.shiftId);
   const structure = s.salaryStructures.find((x) => x.id === e.salaryStructureId);
-  const line = calcLine(e, structure, s.settings);
+  // Monthly estimate without overtime or no-pay days (same engine as the payroll run).
+  const line = calculatePay({ basic: resolveBasic(e.basicSalary, structure?.basic), allowances: structure?.allowances ?? [], deductions: structure?.deductions ?? [], overtimeHours: 0, nopayDays: 0 }, s.settings);
   const att = s.attendance.filter((a) => a.employeeId === e.id).sort((a, b) => b.date.localeCompare(a.date));
   const leaves = s.leaveRequests.filter((l) => l.employeeId === e.id).sort((a, b) => b.from.localeCompare(a.from));
   const balances = leaveBalances(e.id, s.leaveTypes, s.leaveRequests);
@@ -121,7 +122,7 @@ export default function EmployeeProfilePage({ params }: { params: Promise<{ id: 
 
         {tab === "salary" && (
           <div className="p-6">
-            {!structure && !e.basicSalary ? (
+            {!structure && e.basicSalary === undefined ? (
               <EmptyState icon={FileText} title="No salary assigned" text="Assign a salary structure to include this employee in payroll." action={can.manageHR ? <Button onClick={() => router.push(`/employees/${e.id}/edit`)}>Assign salary</Button> : undefined} />
             ) : (
               <>

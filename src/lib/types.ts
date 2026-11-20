@@ -30,11 +30,30 @@ export interface LeaveRequest { id: string; employeeId: string; leaveTypeId: str
 export interface Holiday { id: string; name: string; date: string }
 export interface SalaryItem { id: string; name: string; type: "fixed" | "percent"; amount: number }
 export interface SalaryStructure { id: string; name: string; basic: number; allowances: SalaryItem[]; deductions: SalaryItem[] }
+export interface PayAmount { name: string; amount: number }
+/** Employee details frozen when the payroll line was calculated (payslips show these). */
+export interface EmployeeSnapshot {
+  name: string; empNo: string; designation: string; department: string; branch: string;
+  epfNo: string; bankName: string; bankAccount: string;
+}
 export interface PayrollLine {
   employeeId: string; basic: number;
-  allowances: { name: string; amount: number }[]; deductions: { name: string; amount: number }[];
+  allowances: PayAmount[]; deductions: PayAmount[];
+  overtimeHours: number; nopayDays: number;
   gross: number; epfEmployee: number; totalDeductions: number; net: number; epfEmployer: number; etf: number;
+  employee?: EmployeeSnapshot;
 }
-export interface PayrollRun { id: string; period: string; status: "Draft" | "Approved"; createdAt: string; paymentDate: string; lines: PayrollLine[] }
-export interface PayrollSettings { epfEmployee: number; epfEmployer: number; etf: number; payDay: number; otRate: number }
+export interface PayrollRun {
+  id: string; period: string; status: "Draft" | "Approved"; createdAt: string; paymentDate: string;
+  approvedAt?: string; lines: PayrollLine[];
+  /** Statutory rates used when this run was calculated. */
+  rates?: Pick<PayrollSettings, "epfEmployee" | "epfEmployer" | "etf">;
+}
+export interface PayrollSettings {
+  epfEmployee: number; epfEmployer: number; etf: number; payDay: number; otRate: number;
+  /** Hourly rate = basic ÷ otHoursDivisor (default 240). */
+  otHoursDivisor: number;
+  /** Daily rate for no-pay = basic ÷ nopayDaysDivisor (default 30). */
+  nopayDaysDivisor: number;
+}
 export interface Activity { id: string; type: "employee" | "leave" | "payroll" | "shift" | "attendance" | "settings"; title: string; detail: string; at: string }

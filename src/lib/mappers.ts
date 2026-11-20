@@ -10,6 +10,13 @@ import type {
   Activity, Attendance, AttendanceStatus, Branch, Company, Department, Designation, DocumentRef, Employee,
   Invite, RoleLabel, Shift, Status, User,
 } from "./types";
+import type {
+  HolidayRow, LeaveRequestRow, LeaveStatusDb, LeaveTypeRow, PayrollLineRow, PayrollRunRow, PayrollSettingsRow,
+  SalaryItemRow, SalaryStructureRow,
+} from "@/types/database";
+import type {
+  EmployeeSnapshot, Holiday, LeaveRequest, LeaveStatus, LeaveType, PayrollLine, PayrollRun, PayrollSettings, SalaryStructure,
+} from "./types";
 
 function invert<K extends string, V extends string>(m: Record<K, V>) {
   return Object.fromEntries(Object.entries(m).map(([k, v]) => [v, k])) as Record<V, K>;
@@ -73,3 +80,54 @@ export const toAttendance = (a: AttendanceRow): Attendance => ({
 });
 
 export const toActivity = (a: ActivityRow): Activity => ({ id: a.id, type: a.type, title: a.title, detail: a.detail, at: a.created_at });
+
+// ---------- Developer B ----------
+
+export const LEAVE_STATUS_LABEL: Record<LeaveStatusDb, LeaveStatus> = { pending: "Pending", approved: "Approved", rejected: "Rejected" };
+
+const n0 = (v: number | string | null | undefined) => Number(v ?? 0) || 0;
+
+export const toLeaveType = (t: LeaveTypeRow): LeaveType => ({ id: t.id, name: t.name, daysPerYear: n0(t.days_per_year), paid: t.paid });
+export const toHoliday = (h: HolidayRow): Holiday => ({ id: h.id, name: h.name, date: h.date });
+
+export const toLeaveRequest = (r: LeaveRequestRow): LeaveRequest => ({
+  id: r.id, employeeId: r.employee_id, leaveTypeId: r.leave_type_id, from: r.start_date, to: r.end_date,
+  days: n0(r.days), reason: r.reason, status: LEAVE_STATUS_LABEL[r.status], createdAt: r.created_at,
+});
+
+export function toSalaryStructure(s: SalaryStructureRow, items: SalaryItemRow[]): SalaryStructure {
+  const mine = items.filter((i) => i.structure_id === s.id).sort((a, b) => a.sort_order - b.sort_order);
+  const item = (i: SalaryItemRow) => ({ id: i.id, name: i.name, type: i.amount_type, amount: n0(i.amount) });
+  return {
+    id: s.id, name: s.name, basic: n0(s.basic),
+    allowances: mine.filter((i) => i.kind === "allowance").map(item),
+    deductions: mine.filter((i) => i.kind === "deduction").map(item),
+  };
+}
+
+export const toPayrollSettings = (p: PayrollSettingsRow): PayrollSettings => ({
+  epfEmployee: n0(p.epf_employee), epfEmployer: n0(p.epf_employer), etf: n0(p.etf), payDay: p.pay_day,
+  otRate: n0(p.ot_rate), otHoursDivisor: n0(p.ot_hours_divisor) || 240, nopayDaysDivisor: n0(p.nopay_days_divisor) || 30,
+});
+
+const SNAPSHOT_KEYS: (keyof EmployeeSnapshot)[] = ["name", "empNo", "designation", "department", "branch", "epfNo", "bankName", "bankAccount"];
+const toSnapshot = (s: Record<string, string> | null): EmployeeSnapshot | undefined =>
+  s && s.name ? (Object.fromEntries(SNAPSHOT_KEYS.map((k) => [k, String(s[k] ?? "")])) as unknown as EmployeeSnapshot) : undefined;
+
+export const toPayrollLine = (l: PayrollLineRow): PayrollLine => ({
+  employeeId: l.employee_id, basic: n0(l.basic),
+  allowances: (l.allowances ?? []).map((a) => ({ name: String(a.name), amount: n0(a.amount) })),
+  deductions: (l.deductions ?? []).map((a) => ({ name: String(a.name), amount: n0(a.amount) })),
+  overtimeHours: n0(l.overtime_hours), nopayDays: n0(l.nopay_days),
+  gross: n0(l.gross), epfEmployee: n0(l.epf_employee), totalDeductions: n0(l.total_deductions), net: n0(l.net),
+  epfEmployer: n0(l.epf_employer), etf: n0(l.etf), employee: toSnapshot(l.employee_snapshot),
+});
+
+export const toPayrollRun = (r: PayrollRunRow, lines: PayrollLineRow[]): PayrollRun => ({
+  id: r.id, period: r.period, status: r.status === "approved" ? "Approved" : "Draft", createdAt: r.created_at,
+  paymentDate: r.payment_date ?? "", approvedAt: r.approved_at ?? undefined,
+  lines: lines.filter((l) => l.run_id === r.id).map(toPayrollLine),
+  rates: r.settings_snapshot
+    ? { epfEmployee: n0(r.settings_snapshot.epfEmployee), epfEmployer: n0(r.settings_snapshot.epfEmployer), etf: n0(r.settings_snapshot.etf) }
+    : undefined,
+});

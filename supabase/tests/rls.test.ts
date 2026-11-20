@@ -3,31 +3,9 @@
  * Runs Postgres in-process (PGlite) with small stand-ins for Supabase's
  * auth/storage schemas and roles, then acts as different users.
  */
-import { PGlite } from "@electric-sql/pglite";
-import { btree_gist } from "@electric-sql/pglite/contrib/btree_gist";
-import { readdirSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import type { PGlite } from "@electric-sql/pglite";
 import { beforeAll, describe, expect, it } from "vitest";
-
-const MIGRATIONS = join(__dirname, "..", "migrations");
-
-const SUPABASE_STUBS = `
-create role anon nologin; create role authenticated nologin; create role service_role nologin bypassrls;
-create schema extensions; create schema auth; create schema storage;
-grant usage on schema public, auth, storage, extensions to anon, authenticated, service_role;
-create table auth.users (id uuid primary key, email text, raw_user_meta_data jsonb default '{}');
-create function auth.uid() returns uuid language sql stable as $$
-  select nullif(current_setting('request.jwt.claim.sub', true), '')::uuid $$;
-grant execute on function auth.uid() to anon, authenticated, service_role;
-create table storage.buckets (id text primary key, name text, public boolean, file_size_limit bigint, allowed_mime_types text[]);
-create table storage.objects (id uuid primary key default gen_random_uuid(), bucket_id text, name text);
-alter table storage.objects enable row level security;
-grant all on storage.objects to authenticated, service_role;
-create function storage.foldername(name text) returns text[] language sql immutable as $$
-  select (string_to_array(name, '/'))[1:array_length(string_to_array(name, '/'), 1) - 1] $$;
-alter default privileges in schema public grant all on tables to anon, authenticated, service_role;
-alter default privileges in schema public grant all on functions to anon, authenticated, service_role;
-`;
+import { asUser, migratedDb } from "./harness";
 
 const ADMIN_A = "00000000-0000-4000-8000-00000000000a";
 const ADMIN_B = "00000000-0000-4000-8000-00000000000b";
@@ -38,14 +16,7 @@ let companyA: string;
 let companyB: string;
 let ids: { dep: string; des: string; br: string; emp: string };
 
-async function as<T>(uid: string, fn: () => Promise<T>): Promise<T> {
-  await db.exec(`set role authenticated; select set_config('request.jwt.claim.sub', '${uid}', false);`);
-  try {
-    return await fn();
-  } finally {
-    await db.exec(`reset role; select set_config('request.jwt.claim.sub', '', false);`);
-  }
-}
+const as = <T>(uid: string, fn: () => Promise<T>) => asUser(db, uid, fn);
 const rows = async <T = Record<string, unknown>>(sql: string, params?: unknown[]) => (await db.query<T>(sql, params)).rows;
 const onboard = (name: string) =>
   rows<{ id: string }>(
@@ -54,11 +25,7 @@ const onboard = (name: string) =>
   );
 
 beforeAll(async () => {
-  db = new PGlite({ extensions: { btree_gist } });
-  await db.exec(SUPABASE_STUBS);
-  for (const f of readdirSync(MIGRATIONS).filter((x) => x.endsWith(".sql")).sort()) {
-    await db.exec(readFileSync(join(MIGRATIONS, f), "utf8"));
-  }
+  db = await migratedDb();
   await db.exec(`insert into auth.users (id, email, raw_user_meta_data) values
     ('${ADMIN_A}', 'Admin@A.com', '{"full_name":"Admin A"}'), ('${ADMIN_B}', 'admin@b.com', '{"full_name":"Admin B"}')`);
   companyA = (await as(ADMIN_A, () => onboard("Company A")))[0].id;
@@ -192,5 +159,63 @@ describe("integrity rules used by the API", () => {
     } finally {
       await db.exec(`reset role;`);
     }
+  });
+});
+
+describe("leave and payroll rules (B2)", () => {
+  let annual: string;
+  beforeAll(async () => {
+    annual = (await as(ADMIN_A, () => rows<{ id: string }>(`select id from leave_types where name='Annual Leave'`)))[0].id;
+  });
+
+  it("blocks overlapping leave for the same employee", async () => {
+    await as(INVITED, () => rows(`insert into leave_requests (employee_id, leave_type_id, start_date, end_date, days) values ($1,$2,'2026-11-10','2026-11-12',3)`, [ids.emp, annual]));
+    await expect(
+      as(INVITED, () => rows(`insert into leave_requests (employee_id, leave_type_id, start_date, end_date, days) values ($1,$2,'2026-11-12','2026-11-13',2)`, [ids.emp, annual])),
+    ).rejects.toThrow(/leave_requests_no_overlap/);
+  });
+
+  it("records who decided and keeps decisions final", async () => {
+    const [lr] = await rows<{ id: string }>(`select id from leave_requests where start_date='2026-11-10'`);
+    await as(INVITED, () => rows(`update leave_requests set status='approved' where id=$1`, [lr.id]));
+    expect((await rows<{ decided_by: string }>(`select decided_by from leave_requests where id='${lr.id}'`))[0].decided_by).toBe(INVITED);
+    await expect(as(INVITED, () => rows(`update leave_requests set status='rejected' where id=$1`, [lr.id]))).rejects.toThrow(/already been/);
+  });
+
+  it("leave_balances and approved_leave_on reflect approved leave", async () => {
+    const bal = await as(ADMIN_A, () => rows<{ leave_type_id: string; remaining: string }>(`select * from leave_balances(2026, $1)`, [ids.emp]));
+    expect(Number(bal.find((b) => b.leave_type_id === annual)!.remaining)).toBe(11);
+    expect(await as(ADMIN_A, () => rows(`select * from approved_leave_on('2026-11-11')`))).toHaveLength(1);
+    expect(await as(ADMIN_B, () => rows(`select * from approved_leave_on('2026-11-11')`))).toHaveLength(0);
+  });
+
+  it("only admins approve payroll, and approved runs are locked", async () => {
+    const [run] = await as(ADMIN_A, () => rows<{ id: string }>(`insert into payroll_runs (period, payment_date) values ('2026-11','2026-11-28') returning id`));
+    await as(ADMIN_A, () =>
+      rows(`insert into payroll_lines (run_id, employee_id, basic, gross, epf_employee, total_deductions, net, epf_employer, etf) values ($1,$2,60000,65000,4800,4800,60200,7200,1800)`, [run.id, ids.emp]),
+    );
+    await expect(as(INVITED, () => rows(`select approve_payroll_run($1)`, [run.id]))).rejects.toThrow(/administrators/);
+    // Another company's admin cannot see the run's lines, so the function refuses it.
+    await expect(as(ADMIN_B, () => rows(`select approve_payroll_run($1)`, [run.id]))).rejects.toThrow(/no lines|not found/);
+    await as(ADMIN_A, () => rows(`select approve_payroll_run($1)`, [run.id]));
+
+    await expect(as(ADMIN_A, () => rows(`update payroll_lines set net=1 where run_id=$1`, [run.id]))).rejects.toThrow(/locked/);
+    await expect(as(ADMIN_A, () => rows(`delete from payroll_runs where id=$1`, [run.id]))).rejects.toThrow(/locked/);
+    await expect(as(ADMIN_A, () => rows(`insert into payroll_lines (run_id, employee_id, basic, gross, epf_employee, total_deductions, net, epf_employer, etf) values ($1,$2,1,1,0,0,1,0,0)`, [run.id, ids.emp]))).rejects.toThrow();
+    // Recording the generated payslip PDF is the one allowed change.
+    await as(ADMIN_A, () => rows(`update payroll_lines set payslip_path='x.pdf' where run_id=$1`, [run.id]));
+    await expect(as(ADMIN_A, () => rows(`delete from employees where id=$1`, [ids.emp]))).rejects.toThrow(/foreign key/);
+  });
+
+  it("payroll data is invisible to other companies", async () => {
+    expect(await as(ADMIN_B, () => rows(`select * from payroll_runs`))).toHaveLength(0);
+    expect(await as(ADMIN_B, () => rows(`select * from payroll_lines`))).toHaveLength(0);
+    expect(await as(ADMIN_B, () => rows(`select * from payroll_run_totals`))).toHaveLength(0);
+    expect(await as(ADMIN_B, () => rows(`select * from leave_requests`))).toHaveLength(0);
+  });
+
+  it("HR managers cannot change payroll settings or salary items", async () => {
+    expect((await as(INVITED, () => db.query(`update payroll_settings set epf_employee=1`))).affectedRows).toBe(0);
+    await expect(as(INVITED, () => rows(`insert into storage.objects (bucket_id, name) values ('payslips', '${companyA}/x/y.pdf')`))).rejects.toThrow(/row-level security/);
   });
 });

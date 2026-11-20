@@ -25,6 +25,12 @@ const CONSTRAINT_MESSAGES: Record<string, string> = {
   shifts_company_id_name_key: "A shift with this name already exists.",
   company_invites_company_id_email_key: "This email has already been invited.",
   attendance_employee_id_date_key: "Attendance is already marked for this day.",
+  leave_types_company_id_name_key: "A leave type with this name already exists.",
+  holidays_company_id_date_key: "A holiday already exists on this date.",
+  salary_structures_company_id_name_key: "A salary structure with this name already exists.",
+  payroll_runs_company_id_period_key: "A payroll run already exists for this period.",
+  leave_requests_no_overlap: "This employee already has leave in that period.",
+  employees_salary_structure_fk: "This salary structure is assigned to employees.",
 };
 
 /**
@@ -41,6 +47,8 @@ export function dbError(error: DbErrorLike, notFound = "Record not found."): Api
       return new ApiError(404, notFound);
     case "23505":
       return new ApiError(409, constraint ? CONSTRAINT_MESSAGES[constraint] : "This record already exists.");
+    case "23P01": // exclusion constraint (overlapping leave)
+      return new ApiError(409, constraint ? CONSTRAINT_MESSAGES[constraint] : "This overlaps an existing record.");
     case "23503":
       return new ApiError(409, constraint ? CONSTRAINT_MESSAGES[constraint] : "This record is linked to other data and cannot be changed or deleted.");
     case "23514":

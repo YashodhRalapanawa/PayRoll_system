@@ -106,3 +106,72 @@ export interface ActivityRow {
   detail: string;
   created_at: string;
 }
+
+// ---------- Developer B tables (supabase/migrations/*_b_*.sql) ----------
+export type LeaveStatusDb = "pending" | "approved" | "rejected";
+export type PayrollStatusDb = "draft" | "approved";
+
+export interface LeaveTypeRow { id: string; name: string; days_per_year: number | string; paid: boolean }
+export interface HolidayRow { id: string; name: string; date: string }
+
+export interface LeaveRequestRow {
+  id: string;
+  employee_id: string;
+  leave_type_id: string;
+  start_date: string;
+  end_date: string;
+  days: number | string;
+  reason: string;
+  status: LeaveStatusDb;
+  created_at: string;
+}
+
+export interface SalaryStructureRow { id: string; name: string; basic: number | string }
+export interface SalaryItemRow {
+  id: string;
+  structure_id: string;
+  kind: "allowance" | "deduction";
+  name: string;
+  amount_type: "fixed" | "percent";
+  amount: number | string;
+  sort_order: number;
+}
+
+export interface PayrollSettingsRow {
+  epf_employee: number | string;
+  epf_employer: number | string;
+  etf: number | string;
+  pay_day: number;
+  ot_rate: number | string;
+  ot_hours_divisor: number | string;
+  nopay_days_divisor: number | string;
+}
+
+export interface PayrollRunRow {
+  id: string;
+  period: string;
+  status: PayrollStatusDb;
+  payment_date: string | null;
+  created_at: string;
+  approved_at: string | null;
+  settings_snapshot: Record<string, number | string> | null;
+}
+
+export interface PayrollLineRow {
+  id: string;
+  run_id: string;
+  employee_id: string;
+  employee_snapshot: Record<string, string> | null;
+  basic: number | string;
+  allowances: { name: string; amount: number }[];
+  deductions: { name: string; amount: number }[];
+  overtime_hours: number | string;
+  nopay_days: number | string;
+  gross: number | string;
+  epf_employee: number | string;
+  total_deductions: number | string;
+  net: number | string;
+  epf_employer: number | string;
+  etf: number | string;
+  payslip_path: string | null;
+}

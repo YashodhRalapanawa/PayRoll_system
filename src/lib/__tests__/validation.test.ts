@@ -23,11 +23,16 @@ describe("employee validation", () => {
   });
 
   it("strips unknown keys such as id, company_id and documents", () => {
-    const row = employeeCreateSchema.parse({ ...validEmployee, id: "x", company_id: "evil", documents: [], salaryStructureId: "local" });
+    const row = employeeCreateSchema.parse({ ...validEmployee, id: "x", company_id: "evil", documents: [] });
     expect(row).not.toHaveProperty("id");
     expect(row).not.toHaveProperty("company_id");
     expect(row).not.toHaveProperty("documents");
-    expect(row).not.toHaveProperty("salary_structure_id");
+    expect(row).toHaveProperty("salary_structure_id", null);
+  });
+
+  it("only accepts a real id for the salary structure", () => {
+    expect(employeeCreateSchema.safeParse({ ...validEmployee, salaryStructureId: "local-1" }).success).toBe(false);
+    expect(employeeCreateSchema.parse({ ...validEmployee, salaryStructureId: DEP }).salary_structure_id).toBe(DEP);
   });
 
   it.each([
