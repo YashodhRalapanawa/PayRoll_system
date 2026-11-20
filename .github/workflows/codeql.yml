@@ -1,0 +1,51 @@
+name: CodeQL
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "0 3 * * 1" # every Monday 03:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+  security-events: write
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [javascript-typescript, actions]
+    steps:
+      - uses: actions/checkout@v4
+
+      # CodeQL errors out if a language has no source files, so skip JS/TS
+      # until the app code exists.
+      - name: Check for source files
+        id: src
+        run: |
+          if [ "${{ matrix.language }}" = "javascript-typescript" ] && \
+             [ -z "$(git ls-files '*.js' '*.jsx' '*.ts' '*.tsx' '*.mjs' '*.cjs')" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::No JS/TS files yet - skipping CodeQL for javascript-typescript"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: github/codeql-action/init@v3
+        if: steps.src.outputs.skip != 'true'
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: none
+          queries: security-extended
+
+      - uses: github/codeql-action/analyze@v3
+        if: steps.src.outputs.skip != 'true'
+        with:
+          category: "/language:${{ matrix.language }}"
