@@ -1,126 +1,115 @@
 "use client";
 import { create } from "zustand";
-import { persist } from "zustand/middleware";
-import { useEffect, useState } from "react";
-import { uid } from "./format";
+import { onActivity } from "./api/client";
 import type {
   Activity, Attendance, Branch, Company, Department, Designation, Employee, Holiday, LeaveRequest,
-  LeaveType, PayrollRun, PayrollSettings, SalaryStructure, Shift, User,
+  LeaveType, Me, PayrollRun, PayrollSettings, SalaryStructure, Shift, User,
 } from "./types";
 
 /**
- * Local, browser-only data store (MVP UI phase).
- * Collections mirror the planned Supabase tables so the swap to real APIs stays mechanical.
+ * In-memory cache of the signed-in user's company data.
+ *
+ * Everything is loaded from /api/bootstrap after sign-in and every write goes
+ * through lib/api/*, which updates this store only after the server accepts
+ * the change. Nothing is written to browser storage, and sign-out clears it.
  */
 export interface Collections {
-  users: User[];
   branches: Branch[];
   departments: Department[];
   designations: Designation[];
   employees: Employee[];
   shifts: Shift[];
   attendance: Attendance[];
+  activities: Activity[];
   leaveTypes: LeaveType[];
   leaveRequests: LeaveRequest[];
   holidays: Holiday[];
   salaryStructures: SalaryStructure[];
   payrollRuns: PayrollRun[];
-  activities: Activity[];
 }
 type Key = keyof Collections;
 type Item<K extends Key> = Collections[K][number];
 
-interface State extends Collections {
-  sessionUserId: string | null;
-  company: Company | null;
-  setupComplete: boolean;
+export interface BootstrapData extends Collections {
+  me: Me;
+  company: Company;
   settings: PayrollSettings;
-  register: (u: Omit<User, "id" | "role">) => { ok: boolean; error?: string };
-  login: (email: string, password: string) => { ok: boolean; error?: string };
-  logout: () => void;
-  saveCompany: (c: Company) => void;
-  completeSetup: () => void;
-  saveSettings: (s: PayrollSettings) => void;
+}
+
+interface State extends Collections {
+  me: Me | null;
+  company: Company | null;
+  settings: PayrollSettings;
+  serverReady: boolean;
+
+  hydrateServer: (data: BootstrapData) => void;
+  setCompany: (c: Company) => void;
+  setSettings: (s: PayrollSettings) => void;
+  clearSession: () => void;
   upsert: <K extends Key>(key: K, item: Item<K>) => void;
   upsertMany: <K extends Key>(key: K, items: Item<K>[]) => void;
   remove: <K extends Key>(key: K, id: string) => void;
-  log: (type: Activity["type"], title: string, detail: string) => void;
-  resetAll: () => void;
+  pushActivity: (a: Activity) => void;
 }
 
 const empty: Collections = {
-  users: [], branches: [], departments: [], designations: [], employees: [], shifts: [], attendance: [],
-  leaveTypes: [
-    { id: "lt-annual", name: "Annual Leave", daysPerYear: 14, paid: true },
-    { id: "lt-casual", name: "Casual Leave", daysPerYear: 7, paid: true },
-    { id: "lt-medical", name: "Medical Leave", daysPerYear: 7, paid: true },
-    { id: "lt-nopay", name: "No-pay Leave", daysPerYear: 0, paid: false },
-  ],
-  leaveRequests: [], holidays: [], salaryStructures: [], payrollRuns: [], activities: [],
+  branches: [], departments: [], designations: [], employees: [], shifts: [], attendance: [], activities: [],
+  leaveTypes: [], leaveRequests: [], holidays: [], salaryStructures: [], payrollRuns: [],
 };
-const defaultSettings: PayrollSettings = { epfEmployee: 8, epfEmployer: 12, etf: 3, payDay: 28, otRate: 1.5 };
+/** Display defaults only until bootstrap loads the company's real settings. */
+const defaultSettings: PayrollSettings = { epfEmployee: 8, epfEmployer: 12, etf: 3, payDay: 28, otRate: 1.5, otHoursDivisor: 240, nopayDaysDivisor: 30 };
 
-export const useStore = create<State>()(
-  persist(
-    (set, get) => ({
-      ...empty,
-      sessionUserId: null,
-      company: null,
-      setupComplete: false,
-      settings: defaultSettings,
-      register: ({ name, email, password }) => {
-        const e = email.trim().toLowerCase();
-        if (get().users.some((u) => u.email === e)) return { ok: false, error: "An account with this email already exists." };
-        const user: User = { id: uid(), name: name.trim(), email: e, password, role: "Administrator" };
-        set((s) => ({ users: [...s.users, user], sessionUserId: user.id }));
-        return { ok: true };
-      },
-      login: (email, password) => {
-        const u = get().users.find((x) => x.email === email.trim().toLowerCase());
-        if (!u || u.password !== password) return { ok: false, error: "Invalid email or password." };
-        set({ sessionUserId: u.id });
-        return { ok: true };
-      },
-      logout: () => set({ sessionUserId: null }),
-      saveCompany: (company) => set({ company }),
-      completeSetup: () => set({ setupComplete: true }),
-      saveSettings: (settings) => set({ settings }),
-      upsert: (key, item) =>
-        set((s) => {
-          const list = s[key] as { id: string }[];
-          const exists = list.some((x) => x.id === (item as { id: string }).id);
-          return { [key]: exists ? list.map((x) => (x.id === (item as { id: string }).id ? item : x)) : [...list, item] } as Partial<State>;
-        }),
-      upsertMany: (key, items) =>
-        set((s) => {
-          const map = new Map((s[key] as { id: string }[]).map((x) => [x.id, x]));
-          for (const it of items as { id: string }[]) map.set(it.id, it);
-          return { [key]: [...map.values()] } as Partial<State>;
-        }),
-      remove: (key, id) => set((s) => ({ [key]: (s[key] as { id: string }[]).filter((x) => x.id !== id) }) as Partial<State>),
-      log: (type, title, detail) =>
-        set((s) => ({ activities: [{ id: uid(), type, title, detail, at: new Date().toISOString() }, ...s.activities].slice(0, 50) })),
-      resetAll: () => set({ ...empty, sessionUserId: null, company: null, setupComplete: false, settings: defaultSettings }),
+export const useStore = create<State>()((set) => ({
+  ...empty,
+  me: null,
+  company: null,
+  settings: defaultSettings,
+  serverReady: false,
+
+  hydrateServer: (data) => set({ ...data, serverReady: true }),
+  setCompany: (company) => set({ company }),
+  setSettings: (settings) => set({ settings }),
+  clearSession: () => set({ ...empty, me: null, company: null, settings: defaultSettings, serverReady: false }),
+
+  upsert: (key, item) =>
+    set((s) => {
+      const list = s[key] as { id: string }[];
+      const id = (item as { id: string }).id;
+      const exists = list.some((x) => x.id === id);
+      return { [key]: exists ? list.map((x) => (x.id === id ? item : x)) : [...list, item] } as Partial<State>;
     }),
-    { name: "hr-payroll-store", version: 1 },
-  ),
-);
+  upsertMany: (key, items) =>
+    set((s) => {
+      const map = new Map((s[key] as { id: string }[]).map((x) => [x.id, x]));
+      for (const it of items as { id: string }[]) map.set(it.id, it);
+      return { [key]: [...map.values()] } as Partial<State>;
+    }),
+  remove: (key, id) => set((s) => ({ [key]: (s[key] as { id: string }[]).filter((x) => x.id !== id) }) as Partial<State>),
+  pushActivity: (a) => set((s) => ({ activities: [a, ...s.activities.filter((x) => x.id !== a.id)].slice(0, 50) })),
+}));
 
-/** True once the persisted store has been rehydrated on the client. */
-export function useHydrated() {
-  const [h, setH] = useState(false);
-  useEffect(() => {
-    if (useStore.persist.hasHydrated()) setH(true);
-    return useStore.persist.onFinishHydration(() => setH(true));
-  }, []);
-  return h;
+onActivity((a) => useStore.getState().pushActivity(a));
+
+// Earlier versions kept data (including plain-text passwords) in localStorage. Remove it.
+if (typeof window !== "undefined") {
+  try {
+    window.localStorage.removeItem("hr-payroll-store");
+  } catch {
+    // storage unavailable (private mode): nothing to remove
+  }
 }
 
-export function useCurrentUser() {
-  return useStore((s) => s.users.find((u) => u.id === s.sessionUserId) ?? null);
+export function useCurrentUser(): User | null {
+  return useStore((s) => s.me);
 }
 
-export const empName = (e?: Employee) => (e ? `${e.firstName} ${e.lastName}`.trim() : "Unknown");
+/** UI permissions mirroring the server rules (the server and database are authoritative). */
+export function useCan() {
+  const role = useStore((s) => s.me?.role);
+  return { manageHR: role === "Administrator" || role === "HR Manager", admin: role === "Administrator" };
+}
+
+export const empName = (e?: Pick<Employee, "firstName" | "lastName">) => (e ? `${e.firstName} ${e.lastName}`.trim() : "Unknown");
 
 export function nextEmpNo(employees: Employee[]) {
   const max = employees.reduce((m, e) => Math.max(m, parseInt(e.empNo.replace(/\D/g, "")) || 0), 0);
