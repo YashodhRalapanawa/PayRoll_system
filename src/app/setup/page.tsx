@@ -5,17 +5,20 @@ import { ArrowRight, CheckCircle2, Check, ImagePlus, X } from "lucide-react";
 import { Button, Field, Input, Select, Stepper, Textarea } from "@/components/ui";
 import { Spinner } from "@/components/layout/AppShell";
 import { Logo } from "@/components/layout/Logo";
-import { useHydrated, useStore } from "@/lib/store";
+import { completeOnboarding, getMe, uploadLogo } from "@/lib/api/hr";
+import { ApiClientError, errorMessage } from "@/lib/api/client";
+import { useStore } from "@/lib/store";
+import { createClient } from "@/lib/supabase/client";
 import { COUNTRIES, findCountry } from "@/lib/countries";
-import { uid } from "@/lib/format";
 import type { Company } from "@/lib/types";
 
 const STEPS = ["Company", "Country & Currency", "Store / Branch", "Complete"];
 
 export default function SetupPage() {
   const router = useRouter();
-  const hydrated = useHydrated();
-  const st = useStore();
+  const [checked, setChecked] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [logoFile, setLogoFile] = useState<File | null>(null);
   const [step, setStep] = useState(0);
   const [c, setC] = useState<Company>({
     name: "", email: "", phone: "", address: "", logo: undefined,
@@ -24,20 +27,31 @@ export default function SetupPage() {
   const [b, setB] = useState({ name: "Main Branch", code: "ST001", address: "", contact: "" });
   const [err, setErr] = useState<Record<string, string>>({});
   const fileRef = useRef<HTMLInputElement>(null);
-  const loaded = useRef(false);
+  const done = useRef(false);
 
   useEffect(() => {
-    if (!hydrated) return;
-    if (!st.sessionUserId) router.replace("/login");
-    else if (st.setupComplete && step !== 3) router.replace("/dashboard");
-    if (!loaded.current) {
-      loaded.current = true;
-      if (st.company) setC(st.company);
-      if (st.branches[0]) setB(st.branches[0]);
-    }
-  }, [hydrated, st.sessionUserId, st.setupComplete, st.company, st.branches, router, step]);
+    let alive = true;
+    getMe()
+      .then(({ me }) => {
+        if (!alive) return;
+        if (me.companyId && !done.current) router.replace("/dashboard");
+        else setChecked(true);
+      })
+      .catch((e) => {
+        if (alive && e instanceof ApiClientError && e.status === 401) router.replace("/login");
+      });
+    return () => {
+      alive = false;
+    };
+  }, [router]);
 
-  if (!hydrated || !st.sessionUserId) return <Spinner />;
+  if (!checked) return <Spinner />;
+
+  async function signOut() {
+    await createClient().auth.signOut();
+    useStore.getState().clearSession();
+    router.replace("/login");
+  }
 
   const country = findCountry(c.country);
 
@@ -45,12 +59,13 @@ export default function SetupPage() {
     if (!file) return;
     if (!["image/png", "image/jpeg"].includes(file.type)) return setErr({ logo: "Logo must be PNG or JPG." });
     if (file.size > 2 * 1024 * 1024) return setErr({ logo: "Logo must be 2MB or smaller." });
+    // Preview only; the server re-checks the file type and size on upload.
     const r = new FileReader();
-    r.onload = () => { setC((x) => ({ ...x, logo: r.result as string })); setErr({}); };
+    r.onload = () => { setC((x) => ({ ...x, logo: r.result as string })); setLogoFile(file); setErr({}); };
     r.readAsDataURL(file);
   }
 
-  function next() {
+  async function next() {
     const er: Record<string, string> = {};
     if (step === 0) {
       if (!c.name.trim()) er.name = "Company name is required.";
@@ -67,15 +82,32 @@ export default function SetupPage() {
     setErr(er);
     if (Object.keys(er).length) return;
     if (step < 2) {
-      st.saveCompany(c);
       setStep(step + 1);
-    } else if (step === 2) {
-      st.saveCompany(c);
-      const existing = st.branches[0];
-      st.upsert("branches", { id: existing?.id ?? uid(), ...b });
-      st.completeSetup();
-      st.log("settings", "Company setup completed", `${c.name} is ready to use.`);
+      return;
+    }
+    setBusy(true);
+    try {
+      await completeOnboarding(c, b);
+      done.current = true;
+      if (logoFile) {
+        try {
+          await uploadLogo(logoFile);
+        } catch (e) {
+          setErr({ form: `Company created, but the logo could not be uploaded (${errorMessage(e)}). You can add it later in Settings.` });
+        }
+      }
       setStep(3);
+    } catch (e) {
+      const f = e instanceof ApiClientError ? e.fields ?? {} : {};
+      const map: Record<string, string> = {
+        "company.name": "name", "company.email": "email", "company.phone": "phone", "company.address": "address",
+        "branch.name": "bname", "branch.code": "bcode", "branch.address": "baddress", "branch.contact": "bcontact",
+      };
+      const fieldErr = Object.fromEntries(Object.entries(f).map(([k, v]) => [map[k] ?? k, v]));
+      setErr({ ...fieldErr, form: errorMessage(e) });
+      if (Object.keys(fieldErr).some((k) => ["name", "email", "phone", "address"].includes(k))) setStep(0);
+    } finally {
+      setBusy(false);
     }
   }
 
@@ -84,12 +116,13 @@ export default function SetupPage() {
       <div className="mx-auto max-w-4xl">
         <div className="mb-6 flex items-center justify-between">
           <Logo dark={false} />
-          <button onClick={() => { st.logout(); router.replace("/login"); }} className="cursor-pointer text-sm text-slate-500 hover:text-slate-800">Sign out</button>
+          <button onClick={signOut} className="cursor-pointer text-sm text-slate-500 hover:text-slate-800">Sign out</button>
         </div>
         <div className="rounded-3xl bg-white p-6 shadow-xl shadow-brand-600/5 sm:p-10">
           <h1 className="text-2xl font-bold text-slate-900">Company Setup</h1>
           <p className="mt-1 text-sm text-slate-500">Set up your organization details</p>
           <div className="my-8"><Stepper steps={STEPS} current={step} /></div>
+          {err.form && <div role="alert" className="mb-6 rounded-lg bg-rose-50 px-4 py-3 text-sm text-rose-700">{err.form}</div>}
 
           {step === 0 && (
             <div className="grid gap-6 md:grid-cols-[1fr_220px]">
@@ -115,7 +148,7 @@ export default function SetupPage() {
                 <input ref={fileRef} type="file" accept="image/png,image/jpeg" hidden onChange={(e) => onLogo(e.target.files?.[0])} />
                 <div className="mt-2 flex items-center justify-between text-xs text-slate-400">
                   <span>PNG, JPG (Max 2MB)</span>
-                  {c.logo && <button onClick={() => setC({ ...c, logo: undefined })} className="flex cursor-pointer items-center gap-1 text-rose-500"><X className="h-3 w-3" /> Remove</button>}
+                  {c.logo && <button onClick={() => { setC({ ...c, logo: undefined }); setLogoFile(null); }} className="flex cursor-pointer items-center gap-1 text-rose-500"><X className="h-3 w-3" /> Remove</button>}
                 </div>
                 {err.logo && <p className="mt-1 text-xs text-rose-600">{err.logo}</p>}
               </div>
@@ -173,14 +206,14 @@ export default function SetupPage() {
           {step < 3 && (
             <div className="mt-10 flex justify-end gap-3">
               {step === 0 ? (
-                <Button variant="secondary" onClick={() => { st.logout(); router.replace("/login"); }}>Cancel</Button>
+                <Button variant="secondary" onClick={signOut}>Cancel</Button>
               ) : (
                 <Button variant="secondary" onClick={() => setStep(step - 1)}>Back</Button>
               )}
               {step < 2 ? (
                 <Button onClick={next}>Next <ArrowRight className="h-4 w-4" /></Button>
               ) : (
-                <Button onClick={next} icon={Check}>Complete Setup</Button>
+                <Button onClick={next} icon={Check} disabled={busy}>{busy ? "Setting up…" : "Complete Setup"}</Button>
               )}
             </div>
           )}

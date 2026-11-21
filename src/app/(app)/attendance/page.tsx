@@ -1,10 +1,13 @@
 "use client";
 import Link from "next/link";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { AlarmClock, CalendarCheck, CalendarX, Clock, Download, Pencil, Umbrella, UserCheck, Users } from "lucide-react";
 import { Avatar, Button, Card, DataTable, EmptyState, Field, IconBtn, Input, Modal, PageHeader, Select, StatCard, StatusBadge } from "@/components/ui";
 import { useToast } from "@/components/ui/useToast";
-import { empName, useStore } from "@/lib/store";
+import { empName, useCan, useStore } from "@/lib/store";
+import { clearAttendance, loadAttendanceForDate, markPresent, saveAttendance } from "@/lib/api/hr";
+import { errorMessage } from "@/lib/api/client";
+import { isLate } from "@/lib/attendance-rules";
 import { downloadCSV, fmtDate, fmtHours, fmtTime, hoursBetween, today, uid } from "@/lib/format";
 import type { Attendance, AttendanceStatus, Employee } from "@/lib/types";
 
@@ -16,6 +19,13 @@ export default function AttendancePage() {
   const [date, setDate] = useState(today());
   const [branch, setBranch] = useState("");
   const [edit, setEdit] = useState<Attendance | null>(null);
+  const [busy, setBusy] = useState(false);
+  const can = useCan();
+
+  // Always show the server's records for the selected day.
+  useEffect(() => {
+    loadAttendanceForDate(date).catch((e) => show(errorMessage(e)));
+  }, [date, show]);
 
   const rows: Row[] = useMemo(() => {
     const leaveIds = new Set(s.leaveRequests.filter((l) => l.status === "Approved" && l.from <= date && l.to >= date).map((l) => l.employeeId));
@@ -31,19 +41,46 @@ export default function AttendancePage() {
   function lateStatus(emp: Employee, inTime: string): AttendanceStatus {
     const sh = s.shifts.find((x) => x.id === emp.shiftId);
     if (!sh) return "Present";
-    const [h1, m1] = sh.start.split(":").map(Number), [h2, m2] = inTime.split(":").map(Number);
-    return h2 * 60 + m2 > h1 * 60 + m1 + 10 ? "Late" : "Present";
+    // Preview only; the server applies the same rule when saving.
+    return isLate(sh.start, inTime) ? "Late" : "Present";
   }
 
-  function markAllPresent() {
-    const items = rows.filter((r) => !r.rec && !r.onLeave).map((r) => {
-      const sh = s.shifts.find((x) => x.id === r.emp.shiftId);
-      return { id: uid(), employeeId: r.emp.id, date, inTime: sh?.start ?? "08:30", outTime: sh?.end ?? "17:30", status: "Present" as const, overtimeHours: 0 };
-    });
-    if (!items.length) return show("Everyone is already marked");
-    s.upsertMany("attendance", items);
-    s.log("attendance", "Attendance marked", `${items.length} employees marked present for ${fmtDate(date)}.`);
-    show(`${items.length} employees marked present`);
+  async function markAllPresent() {
+    const ids = rows.filter((r) => !r.rec && !r.onLeave).map((r) => r.emp.id);
+    if (!ids.length) return show("Everyone is already marked");
+    setBusy(true);
+    try {
+      const n = await markPresent(date, ids);
+      show(`${n} employees marked present`);
+    } catch (e) {
+      show(errorMessage(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function saveEdit() {
+    if (!edit) return;
+    setBusy(true);
+    try {
+      const saved = await saveAttendance(edit);
+      setEdit(null);
+      show(saved.status === "Late" && edit.status !== "Late" ? "Saved — marked Late by the shift rule" : "Attendance saved");
+    } catch (e) {
+      show(errorMessage(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function clearEdit() {
+    if (!edit) return;
+    try {
+      await clearAttendance(edit.id);
+      setEdit(null);
+    } catch (e) {
+      show(errorMessage(e));
+    }
   }
 
   function openEdit(r: Row) {
@@ -84,7 +121,7 @@ export default function AttendancePage() {
                 ["Emp ID", "Employee", "In", "Out", "Hours", "OT", "Status"],
                 ...rows.map((r) => [r.emp.empNo, empName(r.emp), r.rec?.inTime ?? "", r.rec?.outTime ?? "", fmtHours(hoursBetween(r.rec?.inTime, r.rec?.outTime)), r.rec?.overtimeHours ?? 0, status(r)]),
               ])}>Export</Button>
-              <Button icon={UserCheck} onClick={markAllPresent} disabled={!rows.length}>Mark unmarked as present</Button>
+              {can.manageHR && <Button icon={UserCheck} onClick={markAllPresent} disabled={!rows.length || busy}>Mark unmarked as present</Button>}
             </>
           }
           empty={<EmptyState icon={Users} title="No active employees" text="Add employees to start tracking attendance." />}
@@ -96,16 +133,16 @@ export default function AttendancePage() {
             { key: "h", header: "Hours", render: (r) => fmtHours(hoursBetween(r.rec?.inTime, r.rec?.outTime)) },
             { key: "ot", header: "OT", render: (r) => r.rec?.overtimeHours || "—" },
             { key: "st", header: "Status", render: (r) => status(r) === "Not Marked" ? <span className="text-xs text-slate-400">Not marked</span> : <StatusBadge status={status(r)} /> },
-            { key: "a", header: "", className: "text-right", render: (r) => <IconBtn icon={Pencil} label="Mark / edit" onClick={() => openEdit(r)} /> },
+            { key: "a", header: "", className: "text-right", render: (r) => can.manageHR && <IconBtn icon={Pencil} label="Mark / edit" onClick={() => openEdit(r)} /> },
           ]}
         />
       </Card>
 
       <Modal open={!!edit} onClose={() => setEdit(null)} title={`Attendance — ${empName(editEmp ?? undefined)}`} footer={
         <>
-          {edit && s.attendance.some((a) => a.id === edit.id) && <Button variant="danger" className="mr-auto" onClick={() => { s.remove("attendance", edit.id); setEdit(null); }}>Clear</Button>}
+          {edit && s.attendance.some((a) => a.id === edit.id) && <Button variant="danger" className="mr-auto" onClick={clearEdit}>Clear</Button>}
           <Button variant="secondary" onClick={() => setEdit(null)}>Cancel</Button>
-          <Button onClick={() => { s.upsert("attendance", edit!); setEdit(null); show("Attendance saved"); }}>Save</Button>
+          <Button onClick={saveEdit} disabled={busy}>{busy ? "Saving…" : "Save"}</Button>
         </>
       }>
         {edit && editEmp && (

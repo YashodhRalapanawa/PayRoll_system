@@ -7,6 +7,7 @@ import { Avatar } from "@/components/ui";
 import { empName, useCurrentUser, useStore } from "@/lib/store";
 import { NAV } from "./Sidebar";
 import { relTime } from "@/lib/format";
+import { createClient } from "@/lib/supabase/client";
 
 function useOutside(cb: () => void) {
   const ref = useRef<HTMLDivElement>(null);
@@ -26,11 +27,19 @@ export function Topbar({ onMenu }: { onMenu: () => void }) {
   const employees = useStore((s) => s.employees);
   const activities = useStore((s) => s.activities);
   const pending = useStore((s) => s.leaveRequests.filter((l) => l.status === "Pending").length);
-  const logout = useStore((s) => s.logout);
   const [menu, setMenu] = useState<null | "user" | "notif" | "branch" | "search">(null);
   const [q, setQ] = useState("");
   const close = () => setMenu(null);
   const ref = useOutside(close);
+
+  async function signOut() {
+    close();
+    await createClient().auth.signOut();
+    // Clears server data from memory and this company's local data from the browser.
+    useStore.getState().clearSession();
+    router.replace("/login");
+    router.refresh();
+  }
 
   const results = useMemo(() => {
     if (!q.trim()) return [];
@@ -128,7 +137,7 @@ export function Topbar({ onMenu }: { onMenu: () => void }) {
             <div className="truncate px-3 py-2 text-xs text-slate-400">{user?.email}</div>
             <Link href="/settings" onClick={close} className="flex items-center gap-2 rounded-lg px-3 py-2 text-sm text-slate-700 hover:bg-slate-50"><UserIcon className="h-4 w-4" /> My Profile</Link>
             <Link href="/settings" onClick={close} className="flex items-center gap-2 rounded-lg px-3 py-2 text-sm text-slate-700 hover:bg-slate-50"><Settings className="h-4 w-4" /> Settings</Link>
-            <button onClick={() => { logout(); router.replace("/login"); }} className="flex w-full cursor-pointer items-center gap-2 rounded-lg px-3 py-2 text-sm text-rose-600 hover:bg-rose-50"><LogOut className="h-4 w-4" /> Sign out</button>
+            <button onClick={signOut} className="flex w-full cursor-pointer items-center gap-2 rounded-lg px-3 py-2 text-sm text-rose-600 hover:bg-rose-50"><LogOut className="h-4 w-4" /> Sign out</button>
           </div>
         )}
       </div>

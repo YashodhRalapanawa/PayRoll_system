@@ -5,6 +5,8 @@ import { useState } from "react";
 import { ArrowLeft, Save } from "lucide-react";
 import { Button, Card, Field, Input, Select, Textarea } from "@/components/ui";
 import { empName, nextEmpNo, useStore } from "@/lib/store";
+import { saveEmployee } from "@/lib/api/hr";
+import { ApiClientError, errorMessage } from "@/lib/api/client";
 import { today, uid } from "@/lib/format";
 import type { Employee } from "@/lib/types";
 
@@ -19,10 +21,11 @@ export function EmployeeForm({ existing }: { existing?: Employee }) {
     },
   );
   const [err, setErr] = useState<Record<string, string>>({});
+  const [busy, setBusy] = useState(false);
   const up = (p: Partial<Employee>) => setE({ ...e, ...p });
   const designations = s.designations.filter((d) => !d.departmentId || !e.departmentId || d.departmentId === e.departmentId);
 
-  function save() {
+  async function save() {
     const er: Record<string, string> = {};
     if (!e.empNo.trim()) er.empNo = "Required";
     else if (s.employees.some((x) => x.empNo === e.empNo && x.id !== e.id)) er.empNo = "Employee ID already in use";
@@ -36,10 +39,16 @@ export function EmployeeForm({ existing }: { existing?: Employee }) {
     if (!e.joinDate) er.joinDate = "Required";
     setErr(er);
     if (Object.keys(er).length) return window.scrollTo({ top: 0, behavior: "smooth" });
-    s.upsert("employees", e);
-    const dep = s.departments.find((d) => d.id === e.departmentId)?.name;
-    if (!existing) s.log("employee", "New employee added", `${empName(e)} was added to the ${dep} department.`);
-    router.push(`/employees/${e.id}`);
+    setBusy(true);
+    try {
+      const saved = await saveEmployee(e);
+      router.push(`/employees/${saved.id}`);
+    } catch (x) {
+      // The server validates everything again; show its per-field messages.
+      setErr({ ...(x instanceof ApiClientError ? x.fields ?? {} : {}), form: errorMessage(x) });
+      window.scrollTo({ top: 0, behavior: "smooth" });
+      setBusy(false);
+    }
   }
 
   return (
@@ -51,6 +60,8 @@ export function EmployeeForm({ existing }: { existing?: Employee }) {
           <p className="text-sm text-slate-500">Personal, employment and payroll details.</p>
         </div>
       </div>
+
+      {err.form && <div role="alert" className="rounded-xl bg-rose-50 px-4 py-3 text-sm text-rose-700">{err.form}</div>}
 
       {(s.departments.length === 0 || s.designations.length === 0) && (
         <div className="rounded-xl bg-amber-50 px-4 py-3 text-sm text-amber-800">
@@ -64,11 +75,11 @@ export function EmployeeForm({ existing }: { existing?: Employee }) {
           <Field label="First Name" required error={err.firstName}><Input value={e.firstName} onChange={(x) => up({ firstName: x.target.value })} /></Field>
           <Field label="Last Name" required error={err.lastName}><Input value={e.lastName} onChange={(x) => up({ lastName: x.target.value })} /></Field>
           <Field label="NIC Number" required error={err.nic}><Input value={e.nic} onChange={(x) => up({ nic: x.target.value })} /></Field>
-          <Field label="Date of Birth"><Input type="date" value={e.dob} onChange={(x) => up({ dob: x.target.value })} /></Field>
+          <Field label="Date of Birth" error={err.dob}><Input type="date" value={e.dob} onChange={(x) => up({ dob: x.target.value })} /></Field>
           <Field label="Gender"><Select value={e.gender} onChange={(x) => up({ gender: x.target.value })}><option>Male</option><option>Female</option><option>Other</option></Select></Field>
-          <Field label="Phone Number"><Input value={e.phone} onChange={(x) => up({ phone: x.target.value })} /></Field>
+          <Field label="Phone Number" error={err.phone}><Input value={e.phone} onChange={(x) => up({ phone: x.target.value })} /></Field>
           <Field label="Email" error={err.email}><Input type="email" value={e.email} onChange={(x) => up({ email: x.target.value })} /></Field>
-          <Field label="Address" className="sm:col-span-2 lg:col-span-1"><Textarea rows={1} value={e.address} onChange={(x) => up({ address: x.target.value })} /></Field>
+          <Field label="Address" error={err.address} className="sm:col-span-2 lg:col-span-1"><Textarea rows={1} value={e.address} onChange={(x) => up({ address: x.target.value })} /></Field>
         </div>
       </Card>
 
@@ -91,7 +102,7 @@ export function EmployeeForm({ existing }: { existing?: Employee }) {
               {s.branches.map((b) => <option key={b.id} value={b.id}>{b.name}</option>)}
             </Select>
           </Field>
-          <Field label="Shift">
+          <Field label="Shift" error={err.shiftId}>
             <Select value={e.shiftId ?? ""} onChange={(x) => up({ shiftId: x.target.value || undefined })}>
               <option value="">No shift</option>
               {s.shifts.map((sh) => <option key={sh.id} value={sh.id}>{sh.name}</option>)}
@@ -117,18 +128,18 @@ export function EmployeeForm({ existing }: { existing?: Employee }) {
               {s.salaryStructures.map((st) => <option key={st.id} value={st.id}>{st.name}</option>)}
             </Select>
           </Field>
-          <Field label="Basic Salary Override" hint="Leave empty to use the structure's basic.">
+          <Field label="Basic Salary Override" error={err.basicSalary} hint="Leave empty to use the structure's basic.">
             <Input type="number" min={0} value={e.basicSalary ?? ""} onChange={(x) => up({ basicSalary: x.target.value ? +x.target.value : undefined })} />
           </Field>
-          <Field label="EPF Number"><Input value={e.epfNo ?? ""} onChange={(x) => up({ epfNo: x.target.value })} /></Field>
-          <Field label="Bank Name"><Input value={e.bankName ?? ""} onChange={(x) => up({ bankName: x.target.value })} /></Field>
-          <Field label="Bank Account No."><Input value={e.bankAccount ?? ""} onChange={(x) => up({ bankAccount: x.target.value })} /></Field>
+          <Field label="EPF Number" error={err.epfNo}><Input value={e.epfNo ?? ""} onChange={(x) => up({ epfNo: x.target.value })} /></Field>
+          <Field label="Bank Name" error={err.bankName}><Input value={e.bankName ?? ""} onChange={(x) => up({ bankName: x.target.value })} /></Field>
+          <Field label="Bank Account No." error={err.bankAccount}><Input value={e.bankAccount ?? ""} onChange={(x) => up({ bankAccount: x.target.value })} /></Field>
         </div>
       </Card>
 
       <div className="flex justify-end gap-3">
         <Button variant="secondary" onClick={() => router.back()}>Cancel</Button>
-        <Button icon={Save} onClick={save}>{existing ? "Save Changes" : "Create Employee"}</Button>
+        <Button icon={Save} onClick={save} disabled={busy}>{busy ? "Saving…" : existing ? "Save Changes" : "Create Employee"}</Button>
       </div>
     </div>
   );

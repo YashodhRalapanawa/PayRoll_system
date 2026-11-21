@@ -1,15 +1,17 @@
 "use client";
 import Link from "next/link";
-import { useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Area, AreaChart, CartesianGrid, Cell, Pie, PieChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import {
   ArrowUp, CalendarCheck, CalendarDays, CheckCircle2, CircleDollarSign, Clock, Coins, Play, Settings, UserPlus, Users, Umbrella, AlertCircle,
 } from "lucide-react";
 import { Avatar, Card, Select, StatCard } from "@/components/ui";
-import { empName, useCurrentUser, useStore } from "@/lib/store";
-import { addDays, currentPeriod, fmtDate, fmtPeriod, moneyShort, relTime, today } from "@/lib/format";
-import { sum } from "@/lib/payroll";
+import { useCurrentUser, useStore } from "@/lib/store";
+import { currentPeriod, fmtDate, fmtPeriod, moneyShort, relTime } from "@/lib/format";
+import { getDashboard } from "@/lib/api/payroll";
+import { errorMessage } from "@/lib/api/client";
+import type { DashboardData } from "@/lib/server/dashboard";
 
 const COLORS = ["#7c5cff", "#3b9cff", "#34d399", "#fbbf24", "#f472b6", "#cbd5e1", "#a78bfa", "#22d3ee"];
 const activityIcon = { employee: UserPlus, leave: CalendarCheck, payroll: Coins, shift: CalendarDays, attendance: Clock, settings: Settings };
@@ -18,53 +20,35 @@ const activityTint = {
   shift: "bg-brand-50 text-brand-600", attendance: "bg-brand-50 text-brand-600", settings: "bg-slate-100 text-slate-600",
 };
 
+/** B7 · Dashboard figures come from GET /api/dashboard (fresh on every visit). */
 export default function DashboardPage() {
   const router = useRouter();
   const user = useCurrentUser();
-  const s = useStore();
+  const code = useStore((s) => s.company?.currencyCode ?? "LKR");
   const [range, setRange] = useState(7);
   const [period, setPeriod] = useState(currentPeriod());
-  const t = today();
-  const code = s.company?.currencyCode ?? "LKR";
+  const [d, setD] = useState<DashboardData | null>(null);
+  const [error, setError] = useState("");
 
-  const active = s.employees.filter((e) => e.status === "Active");
-  const todays = s.attendance.filter((a) => a.date === t);
-  const present = todays.filter((a) => ["Present", "Late", "Half Day"].includes(a.status)).length;
-  const onLeaveIds = new Set(s.leaveRequests.filter((l) => l.status === "Approved" && l.from <= t && l.to >= t).map((l) => l.employeeId));
-  const thisMonthRun = s.payrollRuns.find((r) => r.period === currentPeriod());
-  const lastMonthCount = s.employees.filter((e) => e.joinDate < t.slice(0, 8) + "01").length;
-  const delta = s.employees.length - lastMonthCount;
+  useEffect(() => {
+    let alive = true;
+    getDashboard(range, period)
+      .then((x) => { if (alive) { setD(x); setError(""); } })
+      .catch((e) => alive && setError(errorMessage(e)));
+    return () => {
+      alive = false;
+    };
+  }, [range, period]);
 
-  const chart = useMemo(() => {
-    return Array.from({ length: range }, (_, i) => {
-      const d = addDays(t, i - range + 1);
-      const day = s.attendance.filter((a) => a.date === d);
-      const p = day.filter((a) => ["Present", "Late", "Half Day"].includes(a.status)).length;
-      const total = active.length;
-      return { day: fmtDate(d, { month: "short", day: "numeric" }), rate: total ? Math.round((p / total) * 1000) / 10 : 0 };
-    });
-  }, [range, s.attendance, active.length, t]);
-
-  const dist = useMemo(() => {
-    const m = new Map<string, number>();
-    for (const e of active) {
-      const n = s.departments.find((d) => d.id === e.departmentId)?.name ?? "Other";
-      m.set(n, (m.get(n) ?? 0) + 1);
-    }
-    return [...m.entries()].sort((a, b) => b[1] - a[1]).map(([name, value]) => ({ name, value }));
-  }, [active, s.departments]);
-
-  const upcoming = s.leaveRequests
-    .filter((l) => l.status !== "Rejected" && l.to >= t)
-    .sort((a, b) => a.from.localeCompare(b.from))
-    .slice(0, 4);
-  const selRun = s.payrollRuns.find((r) => r.period === period);
-  const missingSalary = active.filter((e) => !e.salaryStructureId && !e.basicSalary).length;
   const periods = Array.from({ length: 6 }, (_, i) => {
-    const d = new Date();
-    d.setMonth(d.getMonth() - i);
-    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+    const dt = new Date();
+    dt.setDate(1);
+    dt.setMonth(dt.getMonth() - i);
+    return `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, "0")}`;
   });
+  const active = d?.stats.activeEmployees ?? 0;
+  const pct = (n: number) => (active ? ((n / active) * 100).toFixed(1) : "0");
+  const chart = (d?.attendanceTrend ?? []).map((p) => ({ day: fmtDate(p.date, { month: "short", day: "numeric" }), rate: p.rate }));
 
   return (
     <div className="space-y-6">
@@ -79,15 +63,17 @@ export default function DashboardPage() {
         </div>
       </div>
 
+      {error && <div role="alert" className="rounded-xl bg-rose-50 px-4 py-3 text-sm text-rose-700">Could not load the dashboard: {error}</div>}
+
       <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
         <StatCard
-          label="Total Employees" value={active.length} icon={Users} tint="violet"
-          badge={delta > 0 ? <span className="inline-flex items-center gap-0.5 rounded-full bg-emerald-100 px-2 py-0.5 text-xs font-semibold text-emerald-700"><ArrowUp className="h-3 w-3" />{delta}</span> : undefined}
-          sub="vs. last month"
+          label="Total Employees" value={active} icon={Users} tint="violet"
+          badge={d && d.stats.joinedThisMonth > 0 ? <span className="inline-flex items-center gap-0.5 rounded-full bg-emerald-100 px-2 py-0.5 text-xs font-semibold text-emerald-700"><ArrowUp className="h-3 w-3" />{d.stats.joinedThisMonth}</span> : undefined}
+          sub="joined this month"
         />
-        <StatCard label="Present Today" value={present} icon={CalendarCheck} tint="green" sub={`${active.length ? ((present / active.length) * 100).toFixed(1) : 0}% attendance`} />
-        <StatCard label="On Leave" value={onLeaveIds.size} icon={Umbrella} tint="amber" sub={`${active.length ? ((onLeaveIds.size / active.length) * 100).toFixed(1) : 0}% of employees`} />
-        <StatCard label="Payroll (This Month)" value={moneyShort(thisMonthRun ? sum(thisMonthRun.lines, "net") : 0, code)} icon={CircleDollarSign} tint="pink" sub={fmtPeriod(currentPeriod())} />
+        <StatCard label="Present Today" value={d?.stats.presentToday ?? "—"} icon={CalendarCheck} tint="green" sub={`${pct(d?.stats.presentToday ?? 0)}% attendance`} />
+        <StatCard label="On Leave" value={d?.stats.onLeaveToday ?? "—"} icon={Umbrella} tint="amber" sub={`${pct(d?.stats.onLeaveToday ?? 0)}% of employees`} />
+        <StatCard label="Payroll (This Month)" value={moneyShort(d?.stats.payrollThisMonth ?? 0, code)} icon={CircleDollarSign} tint="pink" sub={fmtPeriod(currentPeriod())} />
       </div>
 
       <div className="grid gap-6 xl:grid-cols-[1.4fr_1fr]">
@@ -116,30 +102,30 @@ export default function DashboardPage() {
         </Card>
 
         <Card title="Employee Distribution">
-          {dist.length === 0 ? (
-            <Empty text="Add employees to departments to see the distribution." href="/employees/new" cta="Add employee" />
+          {!d || d.departments.length === 0 ? (
+            <Empty text={d ? "Add employees to departments to see the distribution." : "Loading…"} href={d ? "/employees/new" : undefined} cta="Add employee" />
           ) : (
             <div className="flex flex-col items-center gap-4 p-5 sm:flex-row">
               <div className="relative h-52 w-52 shrink-0">
                 <ResponsiveContainer>
                   <PieChart>
-                    <Pie data={dist} dataKey="value" innerRadius={62} outerRadius={92} paddingAngle={1} stroke="none">
-                      {dist.map((_, i) => <Cell key={i} fill={COLORS[i % COLORS.length]} />)}
+                    <Pie data={d.departments} dataKey="value" innerRadius={62} outerRadius={92} paddingAngle={1} stroke="none">
+                      {d.departments.map((_, i) => <Cell key={i} fill={COLORS[i % COLORS.length]} />)}
                     </Pie>
                   </PieChart>
                 </ResponsiveContainer>
                 <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center">
-                  <span className="text-2xl font-bold text-slate-900">{active.length}</span>
+                  <span className="text-2xl font-bold text-slate-900">{active}</span>
                   <span className="text-xs text-slate-500">Employees</span>
                 </div>
               </div>
               <ul className="w-full space-y-2.5 text-sm">
-                {dist.map((d, i) => (
-                  <li key={d.name} className="flex items-center gap-2">
+                {d.departments.map((x, i) => (
+                  <li key={x.name} className="flex items-center gap-2">
                     <span className="h-2.5 w-2.5 rounded-full" style={{ background: COLORS[i % COLORS.length] }} />
-                    <span className="flex-1 truncate text-slate-700">{d.name}</span>
-                    <span className="w-8 text-right font-semibold text-slate-800">{d.value}</span>
-                    <span className="w-12 text-right text-slate-500">{((d.value / active.length) * 100).toFixed(1)}%</span>
+                    <span className="flex-1 truncate text-slate-700">{x.name}</span>
+                    <span className="w-8 text-right font-semibold text-slate-800">{x.value}</span>
+                    <span className="w-12 text-right text-slate-500">{pct(x.value)}%</span>
                   </li>
                 ))}
               </ul>
@@ -150,11 +136,11 @@ export default function DashboardPage() {
 
       <div className="grid gap-6 lg:grid-cols-2 xl:grid-cols-3">
         <Card title="Recent Activities" action={<Link href="/reports" className="text-sm font-medium text-brand-600 hover:underline">View All</Link>}>
-          {s.activities.length === 0 ? (
-            <Empty text="Activity will appear here as you use the system." />
+          {!d || d.activities.length === 0 ? (
+            <Empty text={d ? "Activity will appear here as you use the system." : "Loading…"} />
           ) : (
             <ul className="space-y-4 p-5">
-              {s.activities.slice(0, 4).map((a) => {
+              {d.activities.map((a) => {
                 const Icon = activityIcon[a.type];
                 return (
                   <li key={a.id} className="flex gap-3">
@@ -172,23 +158,20 @@ export default function DashboardPage() {
         </Card>
 
         <Card title="Upcoming Leaves" action={<Link href="/leave" className="text-sm font-medium text-brand-600 hover:underline">View All</Link>}>
-          {upcoming.length === 0 ? (
-            <Empty text="No upcoming leave." />
+          {!d || d.upcomingLeaves.length === 0 ? (
+            <Empty text={d ? "No upcoming leave." : "Loading…"} />
           ) : (
             <ul className="divide-y divide-slate-100 px-5 py-3">
-              {upcoming.map((l) => {
-                const e = s.employees.find((x) => x.id === l.employeeId);
-                return (
-                  <li key={l.id} className="flex items-center gap-3 py-3">
-                    <Avatar name={empName(e)} size={40} />
-                    <div className="min-w-0 flex-1">
-                      <div className="truncate text-sm font-semibold text-slate-800">{empName(e)}</div>
-                      <div className="text-xs text-slate-500">{s.leaveTypes.find((t) => t.id === l.leaveTypeId)?.name} {l.status === "Pending" && "· Pending"}</div>
-                    </div>
-                    <span className="shrink-0 text-xs text-slate-600">{fmtDate(l.from, { month: "short", day: "numeric" })}{l.to !== l.from && ` – ${fmtDate(l.to, { month: "short", day: "numeric" })}`}</span>
-                  </li>
-                );
-              })}
+              {d.upcomingLeaves.map((l) => (
+                <li key={l.id} className="flex items-center gap-3 py-3">
+                  <Avatar name={l.employeeName} size={40} />
+                  <div className="min-w-0 flex-1">
+                    <div className="truncate text-sm font-semibold text-slate-800">{l.employeeName}</div>
+                    <div className="text-xs text-slate-500">{l.leaveType} {l.status === "Pending" && "· Pending"}</div>
+                  </div>
+                  <span className="shrink-0 text-xs text-slate-600">{fmtDate(l.from, { month: "short", day: "numeric" })}{l.to !== l.from && ` – ${fmtDate(l.to, { month: "short", day: "numeric" })}`}</span>
+                </li>
+              ))}
             </ul>
           )}
         </Card>
@@ -199,28 +182,30 @@ export default function DashboardPage() {
           </Select>
         }>
           <div className="flex flex-col items-center p-6 text-center">
-            {selRun?.status === "Approved" ? (
+            {!d ? (
+              <Empty text="Loading…" />
+            ) : d.payroll.status === "Approved" ? (
               <>
                 <CheckCircle2 className="h-12 w-12 text-emerald-500" />
                 <div className="mt-3 text-lg font-bold text-emerald-600">Payroll Completed</div>
-                <p className="text-sm text-slate-500">{selRun.lines.length} payslips · {moneyShort(sum(selRun.lines, "net"), code)} net</p>
+                <p className="text-sm text-slate-500">{d.payroll.employees} payslips · {moneyShort(d.payroll.net, code)} net</p>
               </>
-            ) : active.length === 0 ? (
+            ) : active === 0 ? (
               <>
                 <AlertCircle className="h-12 w-12 text-slate-300" />
                 <div className="mt-3 text-lg font-bold text-slate-600">No Employees Yet</div>
                 <p className="text-sm text-slate-500">Add employees before processing payroll.</p>
               </>
-            ) : missingSalary > 0 ? (
+            ) : d.payroll.missingSalary > 0 ? (
               <>
                 <AlertCircle className="h-12 w-12 text-amber-500" />
                 <div className="mt-3 text-lg font-bold text-amber-600">Salary Data Incomplete</div>
-                <p className="text-sm text-slate-500">{missingSalary} employee(s) have no salary structure.</p>
+                <p className="text-sm text-slate-500">{d.payroll.missingSalary} employee(s) have no salary structure.</p>
               </>
             ) : (
               <>
                 <CheckCircle2 className="h-12 w-12 text-emerald-500" />
-                <div className="mt-3 text-lg font-bold text-emerald-600">{selRun ? "Draft Ready for Approval" : "Ready for Processing"}</div>
+                <div className="mt-3 text-lg font-bold text-emerald-600">{d.payroll.status === "Draft" ? "Draft Ready for Approval" : "Ready for Processing"}</div>
                 <p className="text-sm text-slate-500">All employee salary data is up to date.</p>
               </>
             )}

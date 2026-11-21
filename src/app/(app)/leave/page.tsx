@@ -4,9 +4,11 @@ import { useMemo, useState } from "react";
 import { Check, Plus, Umbrella, X } from "lucide-react";
 import { Avatar, Button, Card, DataTable, EmptyState, Field, Input, Modal, PageHeader, Select, StatusBadge, Tabs, Textarea } from "@/components/ui";
 import { useToast } from "@/components/ui/useToast";
-import { empName, useStore } from "@/lib/store";
-import { daysBetween, fmtDate, today, uid } from "@/lib/format";
-import { leaveBalances } from "@/lib/leave";
+import { empName, useCan, useStore } from "@/lib/store";
+import { fmtDate, today, uid } from "@/lib/format";
+import { leaveBalances, leaveWorkingDays } from "@/lib/leave";
+import { decideLeave, requestLeave } from "@/lib/api/payroll";
+import { errorMessage } from "@/lib/api/client";
 import type { LeaveRequest } from "@/lib/types";
 
 type Tab = "All" | "Pending" | "Approved" | "Rejected" | "balances";
@@ -19,6 +21,8 @@ export default function LeavePage() {
   const [toast, show] = useToast();
   const [form, setForm] = useState<LeaveRequest | null>(null);
   const [err, setErr] = useState("");
+  const [busy, setBusy] = useState(false);
+  const can = useCan();
 
   const sorted = useMemo(() => [...s.leaveRequests].sort((a, b) => b.createdAt.localeCompare(a.createdAt)), [s.leaveRequests]);
   const rows = tab === "All" || tab === "balances" ? sorted : sorted.filter((l) => l.status === tab);
@@ -30,19 +34,10 @@ export default function LeavePage() {
     setErr("");
     setForm({ id: uid(), employeeId: "", leaveTypeId: s.leaveTypes[0]?.id ?? "", from: today(), to: today(), days: 1, reason: "", status: "Pending", createdAt: new Date().toISOString() });
   }
-  function workingDays(from: string, to: string) {
-    const holidays = new Set(s.holidays.map((h) => h.date));
-    let c = 0;
-    const total = daysBetween(from, to);
-    for (let i = 0; i < total; i++) {
-      const d = new Date(from + "T00:00:00");
-      d.setDate(d.getDate() + i);
-      const iso = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-      if (d.getDay() !== 0 && !holidays.has(iso)) c++;
-    }
-    return c;
-  }
-  function submit() {
+  /** Preview only; the server recounts working days when the request is saved. */
+  const workingDays = (from: string, to: string) => leaveWorkingDays(from, to, s.holidays.map((h) => h.date));
+
+  async function submit() {
     const f = form!;
     if (!f.employeeId) return setErr("Select an employee.");
     if (!f.leaveTypeId) return setErr("Select a leave type.");
@@ -52,21 +47,31 @@ export default function LeavePage() {
     if (overlap) return setErr("This employee already has leave in that period.");
     const bal = leaveBalances(f.employeeId, s.leaveTypes, s.leaveRequests).find((b) => b.type.id === f.leaveTypeId);
     if (bal && bal.type.paid && f.days > bal.remaining - bal.pending) return setErr(`Insufficient balance: ${bal.remaining - bal.pending} day(s) available.`);
-    s.upsert("leaveRequests", f);
-    show("Leave request submitted");
-    setForm(null);
+    setBusy(true);
+    try {
+      await requestLeave({ employeeId: f.employeeId, leaveTypeId: f.leaveTypeId, from: f.from, to: f.to, reason: f.reason });
+      show("Leave request submitted");
+      setForm(null);
+    } catch (e) {
+      setErr(errorMessage(e));
+    } finally {
+      setBusy(false);
+    }
   }
-  function decide(l: LeaveRequest, status: "Approved" | "Rejected") {
-    s.upsert("leaveRequests", { ...l, status });
-    s.log("leave", `Leave ${status.toLowerCase()}`, `Leave request from ${empName(emp(l.employeeId))} (${fmtDate(l.from, { month: "short", day: "numeric" })} – ${fmtDate(l.to, { month: "short", day: "numeric" })}) ${status.toLowerCase()}.`);
-    show(`Leave ${status.toLowerCase()}`);
+  async function decide(l: LeaveRequest, status: "Approved" | "Rejected") {
+    try {
+      await decideLeave(l.id, status === "Approved" ? "approve" : "reject");
+      show(`Leave ${status.toLowerCase()}`);
+    } catch (e) {
+      show(errorMessage(e));
+    }
   }
 
   const active = s.employees.filter((e) => e.status === "Active");
 
   return (
     <div>
-      <PageHeader title="Leave Requests" subtitle="Requests, approvals and balances." actions={<Button icon={Plus} onClick={newRequest}>New Leave Request</Button>} />
+      <PageHeader title="Leave Requests" subtitle="Requests, approvals and balances." actions={can.manageHR ? <Button icon={Plus} onClick={newRequest}>New Leave Request</Button> : undefined} />
       <Card>
         <div className="px-5 pt-2">
           <Tabs<Tab> value={tab} onChange={(t) => router.replace(t === "All" ? "/leave" : `/leave?tab=${t}`)} tabs={[
@@ -97,7 +102,7 @@ export default function LeavePage() {
               { key: "d", header: "Days", render: (l) => <b>{l.days}</b> },
               { key: "r", header: "Reason", render: (l) => <span className="line-clamp-1 max-w-48 text-slate-500">{l.reason || "—"}</span> },
               { key: "s", header: "Status", render: (l) => <StatusBadge status={l.status} /> },
-              { key: "a", header: "", className: "text-right", render: (l) => l.status === "Pending" ? (
+              { key: "a", header: "", className: "text-right", render: (l) => l.status === "Pending" && can.manageHR ? (
                 <div className="flex justify-end gap-1">
                   <Button size="sm" variant="success" icon={Check} onClick={() => decide(l, "Approved")}>Approve</Button>
                   <Button size="sm" variant="danger" icon={X} onClick={() => decide(l, "Rejected")}>Reject</Button>
@@ -107,7 +112,7 @@ export default function LeavePage() {
         )}
       </Card>
 
-      <Modal open={!!form} onClose={() => setForm(null)} title="New Leave Request" footer={<><Button variant="secondary" onClick={() => setForm(null)}>Cancel</Button><Button onClick={submit}>Submit Request</Button></>}>
+      <Modal open={!!form} onClose={() => setForm(null)} title="New Leave Request" footer={<><Button variant="secondary" onClick={() => setForm(null)}>Cancel</Button><Button onClick={submit} disabled={busy}>{busy ? "Submitting…" : "Submit Request"}</Button></>}>
         {form && (() => {
           const up = (p: Partial<LeaveRequest>) => {
             const f = { ...form, ...p };
@@ -131,7 +136,7 @@ export default function LeavePage() {
               <Field label="From" required><Input type="date" value={form.from} onChange={(e) => up({ from: e.target.value, to: form.to < e.target.value ? e.target.value : form.to })} /></Field>
               <Field label="To" required><Input type="date" min={form.from} value={form.to} onChange={(e) => up({ to: e.target.value })} /></Field>
               <div className="rounded-xl bg-brand-50 px-4 py-3 text-sm text-brand-800 sm:col-span-2"><b>{form.days}</b> working day(s) — Sundays and holidays are excluded.</div>
-              <Field label="Reason" className="sm:col-span-2"><Textarea value={form.reason} onChange={(e) => setForm({ ...form, reason: e.target.value })} /></Field>
+              <Field label="Reason" className="sm:col-span-2"><Textarea maxLength={500} value={form.reason} onChange={(e) => setForm({ ...form, reason: e.target.value })} /></Field>
             </div>
           );
         })()}
